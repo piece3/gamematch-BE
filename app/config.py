@@ -11,12 +11,14 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    @field_validator("database_url", mode="before")
+
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return value
+
 settings = Settings()
 
 
-@field_validator("database_url", mode="before")
-@classmethod
-def normalize_database_url(cls, value: str) -> str:
-    if isinstance(value, str) and value.startswith("postgresql://"):
-        return value.replace("postgresql://", "postgresql+psycopg2://", 1)
-    return value
