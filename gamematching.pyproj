@@ -2637,12 +2637,17 @@
     <Compile Include=".venv\Scripts\activate_this.py" />
     <Compile Include="alembic\env.py" />
     <Compile Include="alembic\versions\001_create_users_table.py" />
+    <Compile Include="alembic\versions\002_email_verification.py" />
     <Compile Include="app\api\auth.py" />
     <Compile Include="app\api\__init__.py" />
     <Compile Include="app\config.py" />
     <Compile Include="app\core\deps.py" />
     <Compile Include="app\core\security.py" />
     <Compile Include="app\database.py" />
+    <Compile Include="app\models\email_verification_token.py" />
+    <Compile Include="app\schemas\email.py" />
+    <Compile Include="app\services\email_verification.py" />
+    <Compile Include="app\services\__init__.py" />
     <Compile Include="example.py" />
     <Compile Include="app\main.py" />
     <Compile Include="app\models\user.py" />
@@ -3248,9 +3253,8 @@
     <Folder Include="app\models\" />
     <Folder Include="app\core\" />
     <Folder Include="app\api\" />
-    <Folder Include="app\models\__pycache__\" />
+    <Folder Include="app\services\" />
     <Folder Include="app\schemas\" />
-    <Folder Include="app\schemas\__pycache__\" />
     <Folder Include="app\__pycache__\" />
     <Folder Include="examples\" />
   </ItemGroup>
@@ -5108,11 +5112,6 @@
     <Content Include="app\api\__pycache__\__init__.cpython-314.pyc" />
     <Content Include="app\core\__pycache__\deps.cpython-314.pyc" />
     <Content Include="app\core\__pycache__\security.cpython-314.pyc" />
-    <Content Include="app\models\__pycache__\user.cpython-314.pyc" />
-    <Content Include="app\models\__pycache__\__init__.cpython-314.pyc" />
-    <Content Include="app\schemas\__pycache__\auth.cpython-314.pyc" />
-    <Content Include="app\schemas\__pycache__\user.cpython-314.pyc" />
-    <Content Include="app\schemas\__pycache__\__init__.cpython-314.pyc" />
     <Content Include="app\__pycache__\config.cpython-314.pyc" />
     <Content Include="app\__pycache__\database.cpython-314.pyc" />
     <Content Include="app\__pycache__\main.cpython-314.pyc" />

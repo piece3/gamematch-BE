@@ -15,7 +15,7 @@ from app.api.auth import router as auth_router
 #앱을 실행할때 시작되는 명령어와 종료 직전에 명령어 = lifespan
 
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    
     yield
 
 app = FastAPI(lifespan=lifespan)      #lifespan == 위에 말한것

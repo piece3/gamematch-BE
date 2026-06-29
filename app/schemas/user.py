@@ -57,4 +57,5 @@ class UserResponse(BaseModel):
     id: int
     email: EmailStr
     nickname: str
+    is_verified: bool
     created_at: datetime

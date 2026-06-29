@@ -11,6 +11,18 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    email_verify_token_expire_hours: int = 24
+    app_base_url: str = "http://127.0.0.1:8000"
+    email_dev_mode: bool = True
+    
+    smtp_host: str = "smtp.gamil.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    mail_from: str = "noreply@example.com"
+    mail_from_name: str = "Game Match"
+
+
     @field_validator("database_url", mode="before")
 
     @classmethod
