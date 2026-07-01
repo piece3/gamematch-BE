@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     mail_from: str = "noreply@example.com"
     mail_from_name: str = "Game Match"
 
+    cors_origins: str = "http://localhost:5173,https://simulooker.github.io"
+
 
     @field_validator("database_url", mode="before")
 
