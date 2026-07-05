@@ -2645,6 +2645,7 @@
     <Compile Include="app\core\security.py" />
     <Compile Include="app\database.py" />
     <Compile Include="app\models\email_verification_token.py" />
+    <Compile Include="app\models\lol_profile.py" />
     <Compile Include="app\schemas\email.py" />
     <Compile Include="app\services\email_verification.py" />
     <Compile Include="app\services\__init__.py" />

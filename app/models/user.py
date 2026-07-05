@@ -1,7 +1,7 @@
-import string
+
 from app.database import Base
 from datetime import datetime
-from sqlalchemy import DateTime, String, func, Boolean
+from sqlalchemy import DateTime, String, func, Boolean,Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -17,4 +17,8 @@ class User(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=func.now(),nullable=False)
-
+    discord_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    department: Mapped[str] = mapped_column(String(50),nullable=False)
+    college: Mapped[str] = mapped_column(String(50), nullable=False)
+    voice_chat_enable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manner_score: Mapped[float] = mapped_column(Float, default=3.0, nullable=False)

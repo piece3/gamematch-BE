@@ -13,7 +13,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     nickname: str = Field(min_length=2,max_length=50)
     password: str = Field(min_length=8,max_length=128)
-
+    college: str = Field(min_length=1, max_length=50)
+    department: str = Field(min_length=1, max_length=50)
     #email 도메인 조건 설정
     @field_validator("email")
     @classmethod
