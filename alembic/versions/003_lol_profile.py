@@ -46,11 +46,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("user_id"),
     )
-    op.create_index(op.f("ix_Lol_profiles_user_id"), "Lol_profiles", ["user_id"], unique=True)
+    op.create_index(op.f("ix_lol_profiles_user_id"), "lol_profiles", ["user_id"], unique=True)
 
 
 def downgrade() -> None:
-    op.drop_index(op.f("ix_Lol_profiles_user_id"), table_name="Lol_profiles")
+    op.drop_index(op.f("ix_lol_profiles_user_id"), table_name="lol_profiles")
     op.drop_table("lol_profiles")
     op.drop_column("users", "manner_score")
     op.drop_column("users", "voice_chat_enable")
