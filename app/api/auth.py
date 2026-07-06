@@ -40,6 +40,8 @@ def register(
         nickname=payload.nickname,
         hashed_password=hash_password(payload.password),
         is_verified=False,
+        college=payload.college,
+        department=payload.department,
     )
     db.add(user)
 
