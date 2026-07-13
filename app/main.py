@@ -6,6 +6,7 @@ from app.database import Base, engine
 import app.models
 from app.api.auth import router as auth_router
 from app.api.profile import router as profile_router
+from app.api.match import router as match_router
 
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -34,7 +35,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(profile_router)
-
+app.include_router(match_router)
 
 #서버 상태가 온라인인지 확인
 @app.get("/health")

@@ -17,7 +17,7 @@ from app.schemas.lolprofile import (
 
 router = APIRouter(prefix="/profile", tags = ["profile"])
 
-def _get_or_greate_lol_profile(db: Session, user_id: int) -> LolProfile:
+def _get_or_create_lol_profile(db: Session, user_id: int) -> LolProfile:
     profile = db.scalar(select(LolProfile).where(LolProfile.user_id == user_id))
     if profile is None:
         profile = LolProfile(
@@ -75,7 +75,7 @@ def update_game_settings(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     ) -> ProfileMeResponse:
-    profile = _get_or_greate_lol_profile(db,current_user.id)
+    profile = _get_or_create_lol_profile(db,current_user.id)
 
     profile.tier = payload.tier.value
     profile.primary_position = payload.primary_position.value

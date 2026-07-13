@@ -2638,7 +2638,9 @@
     <Compile Include="alembic\env.py" />
     <Compile Include="alembic\versions\001_create_users_table.py" />
     <Compile Include="alembic\versions\002_email_verification.py" />
+    <Compile Include="alembic\versions\003_lol_profile.py" />
     <Compile Include="app\api\auth.py" />
+    <Compile Include="app\api\profile.py" />
     <Compile Include="app\api\__init__.py" />
     <Compile Include="app\config.py" />
     <Compile Include="app\core\deps.py" />
@@ -2647,6 +2649,7 @@
     <Compile Include="app\models\email_verification_token.py" />
     <Compile Include="app\models\lol_profile.py" />
     <Compile Include="app\schemas\email.py" />
+    <Compile Include="app\schemas\lolprofile.py" />
     <Compile Include="app\services\email_verification.py" />
     <Compile Include="app\services\__init__.py" />
     <Compile Include="example.py" />
@@ -5113,6 +5116,7 @@
     <Content Include="app\api\__pycache__\__init__.cpython-314.pyc" />
     <Content Include="app\core\__pycache__\deps.cpython-314.pyc" />
     <Content Include="app\core\__pycache__\security.cpython-314.pyc" />
+    <Content Include="app\models\queue_entry.py" />
     <Content Include="app\__pycache__\config.cpython-314.pyc" />
     <Content Include="app\__pycache__\database.cpython-314.pyc" />
     <Content Include="app\__pycache__\main.cpython-314.pyc" />

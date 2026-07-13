@@ -35,13 +35,36 @@ def register(
     background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
 ) -> User:
+
+    existing = db.scalar(select(User).where(User.email == email))
+    if existing is not None:
+        if not existing.is_verified:
+            raw_token = create_and_store_verification_token(db, existing)
+            verify_url = build_verification_url(raw_token)
+            background_tasks.add_task(send_verification_email, existing.email, verify_url)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="이미 가입된 이메일입니다. 인증 메일을 다시 보냈습니다.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 가입된 이메일입니다. 로그인해 주세요.",
+        )
+
+    nickname_taken = db.scalar(select(User).where(User.nickname == payload.nickname))
+    if nickname_taken is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 사용 중인 닉네임입니다.",
+        )
+
     user = User(
         email=payload.email.lower(),
         nickname=payload.nickname,
         hashed_password=hash_password(payload.password),
         is_verified=False,
         college=payload.college,
-        department=payload.department,
+        department=payload.department,  
     )
     db.add(user)
 
@@ -49,9 +72,16 @@ def register(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
+        err = str(exc.orig).lower()
+        if "email" in err:
+            detail = "이미 가입된 이메일입니다."
+        elif "nickname" in err:
+            detail = "이미 사용 중인 닉네임입니다."
+        else:
+            detail = "이미 존재하는 정보입니다."
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="이미 아이디가 존재하는 이메일입니다.",
+            detail=detail,
         ) from exc
 
     db.refresh(user)
