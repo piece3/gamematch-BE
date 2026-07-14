@@ -23,7 +23,7 @@ class LoLPosition(str,Enum):
     MID = "MID"
     ADC = "ADC"
     SUPPORT = "SUPPORT"
-    ANYTHING = "상관없음"
+    ANYTHING = "ANYTHING"
 
 
 ALLOWED_PLAY_STYLES = {

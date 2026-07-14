@@ -1,8 +1,9 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
+
 class QueueJoinResponse(BaseModel):
-    model_config = ConfigDict(From_attributes=True)
+    model_config = ConfigDict(from_attributes=True)
 
     id: int
     game: str
@@ -11,12 +12,13 @@ class QueueJoinResponse(BaseModel):
     position: str
     play_styles: list[str] | None
     status: str
-    joined_at:datetime
-
+    joined_at: datetime
 
 
 class QueueStatusResponse(BaseModel):
     in_queue: bool
+    match_id: int | None = None
+    match_status: str | None = None
     status: str | None = None
     game: str | None = None
     tier: str | None = None
