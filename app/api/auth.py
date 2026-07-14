@@ -36,7 +36,7 @@ def register(
     db: Annotated[Session, Depends(get_db)],
 ) -> User:
 
-    existing = db.scalar(select(User).where(User.email == email))
+    existing = db.scalar(select(User).where(User.email == payload.email.lower()))
     if existing is not None:
         if not existing.is_verified:
             raw_token = create_and_store_verification_token(db, existing)
