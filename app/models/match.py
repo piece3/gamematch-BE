@@ -1,6 +1,14 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -9,6 +17,12 @@ from app.database import Base
 
 class Match(Base):
     __tablename__ = "matches"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending_accept', 'confirmed', 'cancelled', 'completed')",
+            name="ck_matches_status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     game: Mapped[str] = mapped_column(String(20), default="lol", nullable=False)
@@ -40,6 +54,10 @@ class MatchMember(Base):
     __table_args__ = (
         UniqueConstraint("match_id", "user_id", name="uq_match_members_match_user"),
         UniqueConstraint("match_id", "assigned_role", name="uq_match_members_match_role"),
+        CheckConstraint(
+            "accept_status IN ('pending', 'accepted', 'declined')",
+            name="ck_match_members_accept_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

@@ -1,5 +1,4 @@
 from typing import Annotated
-import logging
 
 from sqlalchemy import select
 from app.core.security import create_access_token, verify_password
@@ -14,7 +13,6 @@ from app.core.security import hash_password
 from app.database import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse
-from app.config import settings
 
 from app.schemas.email import MessageResponse, ResendVerificationRequest, VerifyEmailResponse
 from app.services.email_verification import(
@@ -24,42 +22,43 @@ from app.services.email_verification import(
     verify_email_token,
     )
 
-from app.core.deps import get_current_user
-from app.schemas.user import UserResponse
+from app.core.deps import get_current_verified_user
 
 from fastapi.security import OAuth2PasswordRequestForm
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth",tags=["auth"])
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+GENERIC_VERIFICATION_MESSAGE = (
+    "If the account can be registered, a verification email has been sent."
+)
+
+
+@router.post(
+    "/register",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def register(
     payload: UserCreate,
     background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
-) -> User:
+) -> MessageResponse:
 
     existing = db.scalar(select(User).where(User.email == payload.email.lower()))
     if existing is not None:
         if not existing.is_verified:
-            raw_token = create_and_store_verification_token(db, existing)
-            verify_url = build_verification_url(raw_token)
-            # HTTPException 시 BackgroundTasks가 실행되지 않으므로 여기서 직접 호출
-            if settings.email_dev_mode:
-                logger.warning(
-                    "EMAIL DEV MODE (register-resend) | To=%s | verify_url=%s",
-                    existing.email,
-                    verify_url,
-                )
-            else:
-                send_verification_email(existing.email, verify_url)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="이미 가입된 이메일입니다. 인증 메일을 다시 보냈습니다.",
+            raw_token = create_and_store_verification_token(
+                db,
+                existing,
+                respect_cooldown=True,
             )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="이미 가입된 이메일입니다. 로그인해 주세요.",
+            if raw_token is not None:
+                verify_url = build_verification_url(raw_token)
+                background_tasks.add_task(
+                    send_verification_email, existing.email, verify_url
+                )
+        return MessageResponse(
+            message=GENERIC_VERIFICATION_MESSAGE,
         )
 
     nickname_taken = db.scalar(select(User).where(User.nickname == payload.nickname))
@@ -84,10 +83,10 @@ def register(
     except IntegrityError as exc:
         db.rollback()
         err = str(exc.orig).lower()
-        if "email" in err:
-            detail = "이미 가입된 이메일입니다."
-        elif "nickname" in err:
+        if "nickname" in err:
             detail = "이미 사용 중인 닉네임입니다."
+        elif "email" in err:
+            return MessageResponse(message=GENERIC_VERIFICATION_MESSAGE)
         else:
             detail = "이미 존재하는 정보입니다."
         raise HTTPException(
@@ -98,17 +97,12 @@ def register(
     db.refresh(user)
 
     raw_token = create_and_store_verification_token(db, user)
+    if raw_token is None:
+        raise RuntimeError("Failed to create initial verification token")
     verify_url = build_verification_url(raw_token)
-    # BackgroundTasks는 응답 후에 실행됨. DEV면 요청 중에 바로 남겨 Render Logs에서 보이게 함.
-    if settings.email_dev_mode:
-        logger.warning(
-            "EMAIL DEV MODE (register) | To=%s | verify_url=%s",
-            user.email,
-            verify_url,
-        )
     background_tasks.add_task(send_verification_email, user.email, verify_url)
 
-    return user
+    return MessageResponse(message=GENERIC_VERIFICATION_MESSAGE)
 
 
 
@@ -137,7 +131,9 @@ def login(payload: UserLogin, db: Annotated[Session,Depends(get_db)]) -> Token:
 
 
 @router.get("/me", response_model=UserResponse)
-def read_me(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+def read_me(
+    current_user: Annotated[User, Depends(get_current_verified_user)],
+) -> User:
     return current_user
 
 
@@ -163,15 +159,19 @@ def resend_verification(
 ) -> MessageResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
     if user is None:
-        # 보안: 존재 여부 노출 최소화
         return MessageResponse(message="If the account exists, a verification email has been sent.")
 
     if user.is_verified:
-        return MessageResponse(message="Email is already verified.")
+        return MessageResponse(message="If the account exists, a verification email has been sent.")
 
-    raw_token = create_and_store_verification_token(db, user)
-    verify_url = build_verification_url(raw_token)
-    background_tasks.add_task(send_verification_email, user.email, verify_url)
+    raw_token = create_and_store_verification_token(
+        db,
+        user,
+        respect_cooldown=True,
+    )
+    if raw_token is not None:
+        verify_url = build_verification_url(raw_token)
+        background_tasks.add_task(send_verification_email, user.email, verify_url)
 
     return MessageResponse(message="If the account exists, a verification email has been sent.")
 

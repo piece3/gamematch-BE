@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.match import Match, MatchMember
 from app.models.match_evaluation import MatchEvaluation
+from app.models.user import User
 
 MANNER_MIN = 0.0
 MANNER_MAX = 5.0
@@ -20,55 +21,81 @@ def apply_manner_delta(current: float, delta: int, weight: float = 0.2) -> float
     return max(MANNER_MIN, min(MANNER_MAX, round(new_score, 2)))
 
 
+def apply_manner_deltas(db: Session, deltas_by_user_id: dict[int, int]) -> None:
+    """Lock target users in a stable order before changing their scores."""
+    if not deltas_by_user_id:
+        return
+    users = db.scalars(
+        select(User)
+        .where(User.id.in_(sorted(deltas_by_user_id)))
+        .order_by(User.id)
+        .with_for_update()
+    ).all()
+    for user in users:
+        user.manner_score = apply_manner_delta(
+            user.manner_score,
+            deltas_by_user_id[user.id],
+        )
+
+
 def finalize_missing_evaluations(db: Session, match: Match) -> int:
     """
     평가 기한이 지났는데 제출하지 않은 멤버에게
     팀원 전원에 대한 manner_delta=0 (3점) 자동 기록.
     반환: 새로 INSERT한 row 수.
     """
-    if match.status != "completed":
+    locked_match = db.scalar(
+        select(Match).where(Match.id == match.id).with_for_update()
+    )
+    if locked_match is None or locked_match.status != "completed":
         return 0
-    if match.evaluation_deadline is None or match.completed_at is None:
+    if (
+        locked_match.evaluation_deadline is None
+        or locked_match.completed_at is None
+    ):
         return 0
 
     now = datetime.now(UTC)
-    deadline = match.evaluation_deadline
+    deadline = locked_match.evaluation_deadline
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=UTC)
     if now <= deadline:
         return 0
 
     members = db.scalars(
-        select(MatchMember).where(MatchMember.match_id == match.id)
+        select(MatchMember).where(MatchMember.match_id == locked_match.id)
     ).all()
     member_ids = [m.user_id for m in members]
+    existing_pairs = set(
+        db.execute(
+            select(
+                MatchEvaluation.evaluator_user_id,
+                MatchEvaluation.target_user_id,
+            ).where(MatchEvaluation.match_id == locked_match.id)
+        ).all()
+    )
     inserted = 0
 
     for evaluator_id in member_ids:
-        already = db.scalar(
-            select(MatchEvaluation).where(
-                MatchEvaluation.match_id == match.id,
-                MatchEvaluation.evaluator_user_id == evaluator_id,
-            )
-        )
-        if already is not None:
-            continue
-
         for target_id in member_ids:
-            if target_id == evaluator_id:
+            if (
+                target_id == evaluator_id
+                or (evaluator_id, target_id) in existing_pairs
+            ):
                 continue
             db.add(
                 MatchEvaluation(
-                    match_id=match.id,
+                    match_id=locked_match.id,
                     evaluator_user_id=evaluator_id,
                     target_user_id=target_id,
                     manner_delta=NEUTRAL_DELTA,
+                    is_auto=True,
                 )
             )
             inserted += 1
 
     if inserted:
-        db.commit()
+        db.flush()
     return inserted
 
 
@@ -95,12 +122,21 @@ def validate_evaluation_targets(
         seen.add(target_id)
 
 
-def count_evaluations_by_evaluator(db: Session, match_id: int, evaluator_id: int) -> int:
+def count_evaluations_by_evaluator(
+    db: Session,
+    match_id: int,
+    evaluator_id: int,
+    *,
+    manual_only: bool = False,
+) -> int:
+    query = select(MatchEvaluation).where(
+        MatchEvaluation.match_id == match_id,
+        MatchEvaluation.evaluator_user_id == evaluator_id,
+    )
+    if manual_only:
+        query = query.where(MatchEvaluation.is_auto.is_(False))
     rows = db.scalars(
-        select(MatchEvaluation).where(
-            MatchEvaluation.match_id == match_id,
-            MatchEvaluation.evaluator_user_id == evaluator_id,
-        )
+        query
     ).all()
     return len(rows)
 

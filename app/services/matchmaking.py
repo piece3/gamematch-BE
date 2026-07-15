@@ -1,13 +1,14 @@
 from datetime import UTC, datetime, timedelta
 from itertools import combinations
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.models.match import Match, MatchMember
 from app.models.queue_entry import QueueEntry
 
 ACCEPT_TIMEOUT_SECONDS = 30
+MAX_MATCH_CANDIDATES = 20
 
 TIER_RANK: dict[str, int] = {
     "UN_RANKED": 3,
@@ -67,31 +68,52 @@ def can_assign_roles(entries: list) -> dict[int, str] | None:
             candidates[entry.user_id] = list(REQUIRED_ROLES)
         elif entry.position in REQUIRED_ROLES:
             candidates[entry.user_id] = [entry.position]
+            secondary = getattr(entry, "secondary_position", None)
+            if secondary in FLEX_POSITIONS:
+                candidates[entry.user_id].extend(
+                    role for role in REQUIRED_ROLES if role != entry.position
+                )
+            elif (
+                secondary in REQUIRED_ROLES
+                and secondary not in candidates[entry.user_id]
+            ):
+                candidates[entry.user_id].append(secondary)
         else:
             return None
 
     assignment: dict[int, str] = {}
     used: set[str] = set()
     order = sorted(candidates.keys(), key=lambda uid: len(candidates[uid]))
+    best_assignment: dict[int, str] | None = None
+    best_score = -1
 
-    def dfs(idx: int) -> bool:
+    def preference_score(uid: int, role: str) -> int:
+        entry = next(item for item in entries if item.user_id == uid)
+        if entry.position == role:
+            return 2
+        if getattr(entry, "secondary_position", None) == role:
+            return 1
+        return 0
+
+    def dfs(idx: int, score: int) -> None:
+        nonlocal best_assignment, best_score
         if idx == len(order):
-            return True
+            if score > best_score:
+                best_score = score
+                best_assignment = assignment.copy()
+            return
         uid = order[idx]
         for role in candidates[uid]:
             if role in used:
                 continue
             used.add(role)
             assignment[uid] = role
-            if dfs(idx + 1):
-                return True
+            dfs(idx + 1, score + preference_score(uid, role))
             used.remove(role)
             del assignment[uid]
-        return False
 
-    if dfs(0):
-        return assignment
-    return None
+    dfs(0, 0)
+    return best_assignment
 
 
 def play_style_score(styles_a: list[str] | None, styles_b: list[str] | None) -> int:
@@ -107,11 +129,27 @@ def group_tier_compatible(entries: list, elapsed_by_user_id: dict[int, int]) -> 
     return max(ranks) - min(ranks) <= delta
 
 
+def _group_style_score(entries: list[QueueEntry]) -> int:
+    return sum(
+        play_style_score(left.play_styles, right.play_styles)
+        for left, right in combinations(entries, 2)
+    )
+
+
 def try_form_match(db: Session, game: str = "lol") -> Match | None:
+    lock_acquired = db.scalar(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_name))"),
+        {"lock_name": f"matchmaking:{game}"},
+    )
+    if not lock_acquired:
+        return None
+
     waiting = db.scalars(
         select(QueueEntry)
         .where(QueueEntry.status == "waiting", QueueEntry.game == game)
         .order_by(QueueEntry.joined_at.asc())
+        .limit(MAX_MATCH_CANDIDATES)
+        .with_for_update(skip_locked=True)
     ).all()
 
     if len(waiting) < 5:
@@ -119,6 +157,7 @@ def try_form_match(db: Session, game: str = "lol") -> Match | None:
 
     elapsed_map = {e.user_id: calc_elapsed_seconds(e.joined_at) for e in waiting}
 
+    best: tuple[tuple[int, int, int], list[QueueEntry], dict[int, str]] | None = None
     for group in combinations(waiting, 5):
         entries = list(group)
         if not group_tier_compatible(entries, elapsed_map):
@@ -126,15 +165,29 @@ def try_form_match(db: Session, game: str = "lol") -> Match | None:
         roles = can_assign_roles(entries)
         if roles is None:
             continue
-        return _create_match_session(db, entries, roles)
+        ranks = [entry.tier_rank for entry in entries]
+        score = (
+            _group_style_score(entries),
+            -(max(ranks) - min(ranks)),
+            sum(elapsed_map[entry.user_id] for entry in entries),
+        )
+        if best is None or score > best[0]:
+            best = (score, entries, roles)
 
-    return None
+    if best is None:
+        return None
+    return _create_match_session(db, best[1], best[2], game)
 
 
-def _create_match_session(db: Session, entries: list, roles: dict[int, str]) -> Match:
+def _create_match_session(
+    db: Session,
+    entries: list,
+    roles: dict[int, str],
+    game: str,
+) -> Match:
     now = datetime.now(UTC)
     match = Match(
-        game="lol",
+        game=game,
         status="pending_accept",
         accept_deadline=now + timedelta(seconds=ACCEPT_TIMEOUT_SECONDS),
     )
@@ -161,17 +214,32 @@ def _create_match_session(db: Session, entries: list, roles: dict[int, str]) -> 
     return match
 
 
-def cancel_match_and_requeue(db: Session, match: Match) -> None:
-    """거절·타임아웃 시 매칭 취소 후 멤버를 큐(waiting)로 되돌린다."""
+def cancel_match_and_requeue(
+    db: Session,
+    match: Match,
+    *,
+    declined_user_id: int | None = None,
+) -> None:
+    """Cancel a match; remove a decliner and requeue everyone else."""
+    if match.status != "pending_accept":
+        return
     match.status = "cancelled"
 
     members = db.scalars(
-        select(MatchMember).where(MatchMember.match_id == match.id)
+        select(MatchMember)
+        .where(MatchMember.match_id == match.id)
+        .with_for_update()
     ).all()
 
     for member in members:
-        entry = db.scalar(select(QueueEntry).where(QueueEntry.user_id == member.user_id))
-        if entry is not None:
+        entry = db.scalar(
+            select(QueueEntry)
+            .where(QueueEntry.user_id == member.user_id)
+            .with_for_update()
+        )
+        if entry is None:
+            continue
+        if member.user_id == declined_user_id:
+            db.delete(entry)
+        else:
             entry.status = "waiting"
-
-    db.commit()

@@ -1,8 +1,13 @@
-from fastapi import FastAPI
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 
 from contextlib import asynccontextmanager
-from app.database import Base, engine
+from app.database import Base, engine, get_db
 import app.models
 from app.api.auth import router as auth_router
 from app.api.profile import router as profile_router
@@ -41,5 +46,9 @@ app.include_router(ranking_router)
 
 #서버 상태가 온라인인지 확인
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+def health_check(db: Annotated[Session, Depends(get_db)]):
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+    return {"status": "ok", "database": "ready"}

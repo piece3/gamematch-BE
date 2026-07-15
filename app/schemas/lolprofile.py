@@ -46,11 +46,15 @@ class ProfileMeUpdate(BaseModel):
 class GameSettingsUpdate(BaseModel):
     """PATCH /profile/game-settings """
 
-    tier: LoLTier | None = None
     primary_position: LoLPosition
     secondary_position: LoLPosition
     play_styles: list[str] = Field(default_factory=list, max_length=5)
     riot_id: str | None = Field(default=None, max_length=50)
+    riot_verification_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+    )
     sync_tier_from_riot: bool = False
 
     @field_validator("play_styles")
@@ -66,6 +70,7 @@ class RiotSyncRequest(BaseModel):
     """POST /profile/riot/sync — Riot ID 저장 + 티어 동기화"""
 
     riot_id: str = Field(min_length=3, max_length=50)
+    verification_code: str = Field(min_length=1, max_length=100)
 
 
 class LolProfileResponse(BaseModel):
@@ -76,6 +81,8 @@ class LolProfileResponse(BaseModel):
     secondary_position: str
     play_styles: list[str] | None
     tier_rank: int = 0
+    rank_division: str | None = None
+    league_points: int | None = None
     riot_id: str | None = None
     tier_updated_at: datetime | None = None
     updated_at: datetime | None = None

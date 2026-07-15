@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -49,6 +50,7 @@ class MatchEvaluation(Base):
         nullable=False,
     )
     manner_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_auto: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

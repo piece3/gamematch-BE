@@ -19,14 +19,39 @@ def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def create_and_store_verification_token(db: Session, user: User) -> str:
+def create_and_store_verification_token(
+    db: Session,
+    user: User,
+    *,
+    respect_cooldown: bool = False,
+) -> str | None:
+    locked_user = db.scalar(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    if locked_user is None:
+        raise ValueError("User not found")
+
+    if respect_cooldown:
+        latest_created_at = db.scalar(
+            select(EmailVerificationToken.created_at)
+            .where(EmailVerificationToken.user_id == locked_user.id)
+            .order_by(EmailVerificationToken.created_at.desc())
+            .limit(1)
+        )
+        if latest_created_at is not None:
+            retry_at = latest_created_at + timedelta(
+                seconds=settings.email_resend_cooldown_seconds
+            )
+            if datetime.now(UTC) < retry_at:
+                return None
+
     raw_token = secrets.token_urlsafe(32)
     token_hash = _hash_token(raw_token)
     expires_at = datetime.now(UTC) + timedelta(hours=settings.email_verify_token_expire_hours)
 
     old_tokens = db.scalars(
         select(EmailVerificationToken).where(
-            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.user_id == locked_user.id,
             EmailVerificationToken.used_at.is_(None),
         )
     ).all()
@@ -35,7 +60,7 @@ def create_and_store_verification_token(db: Session, user: User) -> str:
 
     db.add(
         EmailVerificationToken(
-            user_id=user.id,
+            user_id=locked_user.id,
             token_hash=token_hash,
             expires_at=expires_at,
         )
@@ -48,7 +73,7 @@ def build_verification_url(raw_token: str) -> str:
     return f"{settings.app_base_url.rstrip('/')}/auth/verify-email?token={raw_token}"
 
 
-def send_verification_email(to_email: str, verification_url: str) -> None:
+def send_verification_email(to_email: str, verification_url: str) -> bool:
     subject = "[Game Match] 이메일 인증을 완료해 주세요"
     body = (
         "아래 링크를 클릭하면 이메일 인증이 완료됩니다.\n\n"
@@ -63,7 +88,24 @@ def send_verification_email(to_email: str, verification_url: str) -> None:
             to_email,
             verification_url,
         )
-        return
+        return True
+
+    missing_settings = [
+        name
+        for name, value in (
+            ("SMTP_HOST", settings.smtp_host),
+            ("SMTP_USER", settings.smtp_user),
+            ("SMTP_PASSWORD", settings.smtp_password),
+            ("MAIL_FROM", settings.mail_from),
+        )
+        if not value
+    ]
+    if missing_settings:
+        logger.error(
+            "Verification email was not sent: missing settings %s",
+            ", ".join(missing_settings),
+        )
+        return False
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -77,9 +119,10 @@ def send_verification_email(to_email: str, verification_url: str) -> None:
             server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(msg)
         logger.info("Verification email sent to %s", to_email)
+        return True
     except Exception:
         logger.exception("Failed to send verification email to %s", to_email)
-        raise
+        return False
 
 
 def verify_email_token(db: Session, raw_token: str) -> User:
@@ -87,7 +130,9 @@ def verify_email_token(db: Session, raw_token: str) -> User:
     now = datetime.now(UTC)
 
     record = db.scalar(
-        select(EmailVerificationToken).where(EmailVerificationToken.token_hash == token_hash)
+        select(EmailVerificationToken)
+        .where(EmailVerificationToken.token_hash == token_hash)
+        .with_for_update()
     )
     if record is None:
         raise ValueError("Invalid token")

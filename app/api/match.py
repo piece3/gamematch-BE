@@ -3,9 +3,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+from app.core.deps import get_current_verified_user
 from app.database import get_db
 from app.models.lol_profile import LolProfile
 from app.models.match import Match, MatchMember
@@ -27,10 +28,9 @@ from app.schemas.match import (
 from app.schemas.queue import QueueJoinResponse, QueueStatusResponse
 from app.services.manner import (
     EVALUATION_TIMEOUT_HOURS,
-    apply_manner_delta,
+    apply_manner_deltas,
     count_evaluations_by_evaluator,
     evaluation_deadline_passed,
-    finalize_missing_evaluations,
     validate_evaluation_targets,
 )
 from app.services.matchmaking import (
@@ -64,12 +64,43 @@ def _get_match_or_404(db: Session, match_id: int) -> Match:
     return match
 
 
+def _get_match_for_update_or_404(db: Session, match_id: int) -> Match:
+    match = db.scalar(
+        select(Match).where(Match.id == match_id).with_for_update()
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="매칭을 찾을 수 없습니다.",
+        )
+    return match
+
+
 def _get_member_or_403(db: Session, match_id: int, user_id: int) -> MatchMember:
     member = db.scalar(
         select(MatchMember).where(
             MatchMember.match_id == match_id,
             MatchMember.user_id == user_id,
         )
+    )
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="이 매칭의 멤버가 아닙니다.",
+        )
+    return member
+
+
+def _get_member_for_update_or_403(
+    db: Session, match_id: int, user_id: int
+) -> MatchMember:
+    member = db.scalar(
+        select(MatchMember)
+        .where(
+            MatchMember.match_id == match_id,
+            MatchMember.user_id == user_id,
+        )
+        .with_for_update()
     )
     if member is None:
         raise HTTPException(
@@ -96,7 +127,9 @@ def _expire_if_needed(db: Session, match: Match) -> None:
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=UTC)
     if now > deadline:
-        cancel_match_and_requeue(db, match)
+        locked_match = _get_match_for_update_or_404(db, match.id)
+        cancel_match_and_requeue(db, locked_match)
+        db.commit()
 
 
 def _find_active_match_for_user(db: Session, user_id: int) -> Match | None:
@@ -109,6 +142,20 @@ def _find_active_match_for_user(db: Session, user_id: int) -> Match | None:
         )
         .order_by(Match.created_at.desc())
     )
+
+
+def _find_live_active_match_for_user(
+    db: Session,
+    user_id: int,
+) -> Match | None:
+    match = _find_active_match_for_user(db, user_id)
+    if match is None:
+        return None
+    _expire_if_needed(db, match)
+    db.refresh(match)
+    if match.status in ("pending_accept", "confirmed"):
+        return match
+    return None
 
 
 def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailResponse:
@@ -127,35 +174,67 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
 
 @router.post("/queue/join", response_model=QueueJoinResponse, status_code=status.HTTP_201_CREATED)
 def join_queue(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> QueueEntry:
-    if not current_user.is_verified:
+    active_match = _find_live_active_match_for_user(db, current_user.id)
+    if active_match is not None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"이미 활성 매칭이 있습니다. match_id={active_match.id}, "
+                f"status={active_match.status}"
+            ),
         )
 
-    existing = db.scalar(select(QueueEntry).where(QueueEntry.user_id == current_user.id))
-    if existing is not None:
+    existing = db.scalar(
+        select(QueueEntry)
+        .where(QueueEntry.user_id == current_user.id)
+        .with_for_update()
+    )
+    if existing is not None and existing.status == "waiting":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="이미 매칭 대기 중입니다.",
         )
+    if existing is not None and existing.status == "matched":
+        # The queue row is locked; do not acquire match locks in the opposite
+        # order. The maintenance/active endpoints handle deadline expiry.
+        active_match = _find_active_match_for_user(db, current_user.id)
+        if active_match is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"이미 활성 매칭이 있습니다. match_id={active_match.id}, "
+                    f"status={active_match.status}"
+                ),
+            )
 
     lol_profile = _get_lol_profile_or_400(db, current_user.id)
 
-    entry = QueueEntry(
-        user_id=current_user.id,
-        game="lol",
-        tier=lol_profile.tier,
-        tier_rank=tier_to_rank(lol_profile.tier),
-        position=lol_profile.primary_position,
-        play_styles=lol_profile.play_styles or [],
-        status="waiting",
-    )
-    db.add(entry)
-    db.commit()
+    if existing is None:
+        entry = QueueEntry(user_id=current_user.id)
+        db.add(entry)
+    else:
+        # A matched row without an active match is stale after a prior crash.
+        entry = existing
+
+    entry.game = "lol"
+    entry.tier = lol_profile.tier
+    entry.tier_rank = tier_to_rank(lol_profile.tier)
+    entry.position = lol_profile.primary_position
+    entry.secondary_position = lol_profile.secondary_position
+    entry.play_styles = lol_profile.play_styles or []
+    entry.status = "waiting"
+    entry.joined_at = datetime.now(UTC)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 매칭 대기 중이거나 활성 매칭이 있습니다.",
+        ) from exc
     db.refresh(entry)
 
     try_form_match(db)
@@ -165,16 +244,35 @@ def join_queue(
 
 @router.get("/queue/status", response_model=QueueStatusResponse)
 def queue_status(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> QueueStatusResponse:
     try_form_match(db)
 
-    active_match = _find_active_match_for_user(db, current_user.id)
+    active_match = _find_live_active_match_for_user(db, current_user.id)
     if active_match is not None:
-        _expire_if_needed(db, active_match)
-        db.refresh(active_match)
-        if active_match.status in ("pending_accept", "confirmed"):
+        return QueueStatusResponse(
+            in_queue=False,
+            match_id=active_match.id,
+            match_status=active_match.status,
+            message=(
+                "매칭이 성사되었습니다. 수락/거절을 진행하세요."
+                if active_match.status == "pending_accept"
+                else "매칭이 확정되었습니다."
+            ),
+        )
+
+    entry = db.scalar(
+        select(QueueEntry)
+        .where(QueueEntry.user_id == current_user.id)
+        .with_for_update()
+    )
+    if entry is None:
+        return QueueStatusResponse(in_queue=False, message="매칭 대기 중이 아닙니다.")
+    if entry.status == "matched":
+        # Matchmaking may have committed after the first active-match lookup.
+        active_match = _find_active_match_for_user(db, current_user.id)
+        if active_match is not None:
             return QueueStatusResponse(
                 in_queue=False,
                 match_id=active_match.id,
@@ -185,15 +283,11 @@ def queue_status(
                     else "매칭이 확정되었습니다."
                 ),
             )
-
-    entry = db.scalar(
-        select(QueueEntry).where(
-            QueueEntry.user_id == current_user.id,
-            QueueEntry.status == "waiting",
-        )
-    )
-    if entry is None:
-        return QueueStatusResponse(in_queue=False, message="매칭 대기 중이 아닙니다.")
+        # No active match owns the locked row, so repair it in place.
+        entry.status = "waiting"
+        entry.joined_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(entry)
 
     elapsed = calc_elapsed_seconds(entry.joined_at)
     delta = allowed_tier_delta(elapsed)
@@ -222,14 +316,14 @@ def queue_status(
 
 @router.delete("/queue/leave", status_code=status.HTTP_204_NO_CONTENT)
 def leave_queue(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
     entry = db.scalar(
         select(QueueEntry).where(
             QueueEntry.user_id == current_user.id,
             QueueEntry.status == "waiting",
-        )
+        ).with_for_update()
     )
     if entry is None:
         raise HTTPException(
@@ -243,7 +337,7 @@ def leave_queue(
 
 @router.get("/history", response_model=MatchHistoryResponse)
 def match_history(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -265,10 +359,6 @@ def match_history(
         match = db.get(Match, membership.match_id)
         if match is None:
             continue
-        if match.status == "completed":
-            finalize_missing_evaluations(db, match)
-            db.refresh(match)
-
         member_count = (
             db.scalar(
                 select(func.count())
@@ -277,7 +367,15 @@ def match_history(
             )
             or 0
         )
-        submitted = count_evaluations_by_evaluator(db, match.id, current_user.id) > 0
+        submitted = (
+            count_evaluations_by_evaluator(
+                db,
+                match.id,
+                current_user.id,
+                manual_only=True,
+            )
+            > 0
+        )
         items.append(
             MatchHistoryItem(
                 match_id=match.id,
@@ -310,7 +408,7 @@ def match_history(
 
 @router.get("/active", response_model=MatchDetailResponse | None)
 def get_active_match(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchDetailResponse | None:
     match = _find_active_match_for_user(db, current_user.id)
@@ -329,23 +427,20 @@ def get_active_match(
 @router.get("/{match_id}", response_model=MatchDetailResponse)
 def get_match(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchDetailResponse:
     match = _get_match_or_404(db, match_id)
     member = _get_member_or_403(db, match_id, current_user.id)
     _expire_if_needed(db, match)
     db.refresh(match)
-    if match.status == "completed":
-        finalize_missing_evaluations(db, match)
-        db.refresh(match)
     return _to_match_detail(match, member)
 
 
 @router.get("/{match_id}/members", response_model=MatchMembersResponse)
 def get_match_members(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchMembersResponse:
     match = _get_match_or_404(db, match_id)
@@ -386,7 +481,7 @@ def get_match_members(
 @router.get("/{match_id}/accept-status", response_model=AcceptStatusResponse)
 def accept_status(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AcceptStatusResponse:
     match = _get_match_or_404(db, match_id)
@@ -426,16 +521,10 @@ def accept_status(
 @router.post("/{match_id}/accept", response_model=MatchActionResponse)
 def accept_match(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchActionResponse:
-    if not current_user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
-        )
-
-    match = _get_match_or_404(db, match_id)
+    match = _get_match_for_update_or_404(db, match_id)
     _expire_if_needed(db, match)
     db.refresh(match)
 
@@ -445,7 +534,7 @@ def accept_match(
             detail=f"수락할 수 있는 상태가 아닙니다. (현재: {match.status})",
         )
 
-    member = _get_member_or_403(db, match_id, current_user.id)
+    member = _get_member_for_update_or_403(db, match_id, current_user.id)
     if member.accept_status != "pending":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -456,19 +545,15 @@ def accept_match(
     member.responded_at = datetime.now(UTC)
     db.flush()
 
-    pending_left = (
-        db.scalar(
-            select(func.count())
-            .select_from(MatchMember)
-            .where(
-                MatchMember.match_id == match_id,
-                MatchMember.accept_status == "pending",
-            )
-        )
-        or 0
-    )
+    members = db.scalars(
+        select(MatchMember)
+        .where(MatchMember.match_id == match_id)
+        .with_for_update()
+    ).all()
+    accepted_count = sum(m.accept_status == "accepted" for m in members)
+    declined_count = sum(m.accept_status == "declined" for m in members)
 
-    if pending_left == 0:
+    if len(members) == 5 and accepted_count == 5 and declined_count == 0:
         match.status = "confirmed"
         match.confirmed_at = datetime.now(UTC)
 
@@ -490,16 +575,10 @@ def accept_match(
 @router.post("/{match_id}/decline", response_model=MatchActionResponse)
 def decline_match(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchActionResponse:
-    if not current_user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
-        )
-
-    match = _get_match_or_404(db, match_id)
+    match = _get_match_for_update_or_404(db, match_id)
     _expire_if_needed(db, match)
     db.refresh(match)
 
@@ -509,7 +588,7 @@ def decline_match(
             detail=f"거절할 수 있는 상태가 아닙니다. (현재: {match.status})",
         )
 
-    member = _get_member_or_403(db, match_id, current_user.id)
+    member = _get_member_for_update_or_403(db, match_id, current_user.id)
     if member.accept_status != "pending":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -518,30 +597,29 @@ def decline_match(
 
     member.accept_status = "declined"
     member.responded_at = datetime.now(UTC)
-    cancel_match_and_requeue(db, match)
+    cancel_match_and_requeue(
+        db,
+        match,
+        declined_user_id=current_user.id,
+    )
+    db.commit()
 
     return MatchActionResponse(
         match_id=match.id,
         status="cancelled",
         my_accept_status="declined",
-        message="거절했습니다. 매칭이 취소되고 대기열로 돌아갑니다.",
+        message="거절했습니다. 본인은 큐에서 제외되고 나머지 멤버는 대기열로 돌아갑니다.",
     )
 
 
 @router.post("/{match_id}/complete", response_model=MatchDetailResponse)
 def complete_match(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchDetailResponse:
-    if not current_user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
-        )
-
-    match = _get_match_or_404(db, match_id)
-    member = _get_member_or_403(db, match_id, current_user.id)
+    match = _get_match_for_update_or_404(db, match_id)
+    member = _get_member_for_update_or_403(db, match_id, current_user.id)
 
     if match.status == "completed":
         return _to_match_detail(match, member)
@@ -574,16 +652,10 @@ def complete_match(
 def evaluate_match(
     match_id: int,
     payload: MatchEvaluateRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchEvaluateResponse:
-    if not current_user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
-        )
-
-    match = _get_match_or_404(db, match_id)
+    match = _get_match_for_update_or_404(db, match_id)
     _get_member_or_403(db, match_id, current_user.id)
 
     if match.status != "completed":
@@ -591,9 +663,6 @@ def evaluate_match(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="게임 완료 후에만 평가할 수 있습니다.",
         )
-
-    finalize_missing_evaluations(db, match)
-    db.refresh(match)
 
     if evaluation_deadline_passed(match):
         raise HTTPException(
@@ -628,15 +697,25 @@ def evaluate_match(
                 evaluator_user_id=current_user.id,
                 target_user_id=item.target_user_id,
                 manner_delta=item.manner_delta,
+                is_auto=False,
             )
         )
-        target = db.get(User, item.target_user_id)
-        if target is not None:
-            target.manner_score = apply_manner_delta(
-                target.manner_score, item.manner_delta
-            )
 
-    db.commit()
+    apply_manner_deltas(
+        db,
+        {
+            item.target_user_id: item.manner_delta
+            for item in payload.evaluations
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 평가를 제출했습니다.",
+        ) from exc
 
     return MatchEvaluateResponse(
         match_id=match_id,
@@ -648,19 +727,20 @@ def evaluate_match(
 @router.get("/{match_id}/evaluations/status", response_model=EvaluationStatusResponse)
 def evaluation_status(
     match_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> EvaluationStatusResponse:
     match = _get_match_or_404(db, match_id)
     _get_member_or_403(db, match_id, current_user.id)
 
-    if match.status == "completed":
-        finalize_missing_evaluations(db, match)
-        db.refresh(match)
-
     member_count = len(_member_user_ids(db, match_id))
     required = max(0, member_count - 1)
-    submitted = count_evaluations_by_evaluator(db, match_id, current_user.id)
+    submitted = count_evaluations_by_evaluator(
+        db,
+        match_id,
+        current_user.id,
+        manual_only=True,
+    )
 
     seconds_remaining = 0
     if match.evaluation_deadline is not None and match.status == "completed":

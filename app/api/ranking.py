@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+from app.core.deps import get_current_verified_user
 from app.database import get_db
 from app.models.lol_profile import LolProfile
 from app.models.user import User
@@ -26,25 +26,24 @@ def get_lol_ranking(
     )
     items = [
         RankingEntry(
-            rank=offset + i,
+            rank=row.rank,
             user_id=row.user_id,
             nickname=row.nickname,
-            college=row.college,
-            department=row.department,
             manner_score=row.manner_score,
             tier=row.tier,
             tier_rank=row.tier_rank,
+            rank_division=row.rank_division,
+            league_points=row.league_points,
             primary_position=row.primary_position,
-            riot_id=row.riot_id,
         )
-        for i, row in enumerate(rows, start=1)
+        for row in rows
     ]
     return RankingListResponse(total=total, limit=limit, offset=offset, items=items)
 
 
 @router.get("/me", response_model=MyRankingResponse)
 def get_my_ranking(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
     include_unranked: Annotated[bool, Query()] = False,
 ) -> MyRankingResponse:
@@ -74,6 +73,8 @@ def get_my_ranking(
         total_players=info.get("total_players"),
         tier=info.get("tier"),
         tier_rank=info.get("tier_rank"),
+        rank_division=info.get("rank_division"),
+        league_points=info.get("league_points"),
         percentile=info.get("percentile"),
         message=info.get("message"),
         has_lol_profile=True,
