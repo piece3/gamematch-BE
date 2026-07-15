@@ -5,7 +5,14 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import settings
 from app.database import Base
-from app.models import LolProfile, Match, MatchMember, QueueEntry, User  # noqa: F401
+from app.models import (  # noqa: F401
+    LolProfile,
+    Match,
+    MatchEvaluation,
+    MatchMember,
+    QueueEntry,
+    User,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url",settings.database_url)

@@ -1,4 +1,5 @@
 from typing import Annotated
+import logging
 
 from sqlalchemy import select
 from app.core.security import create_access_token, verify_password
@@ -13,6 +14,7 @@ from app.core.security import hash_password
 from app.database import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse
+from app.config import settings
 
 from app.schemas.email import MessageResponse, ResendVerificationRequest, VerifyEmailResponse
 from app.services.email_verification import(
@@ -27,6 +29,7 @@ from app.schemas.user import UserResponse
 
 from fastapi.security import OAuth2PasswordRequestForm
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth",tags=["auth"])
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -41,7 +44,15 @@ def register(
         if not existing.is_verified:
             raw_token = create_and_store_verification_token(db, existing)
             verify_url = build_verification_url(raw_token)
-            background_tasks.add_task(send_verification_email, existing.email, verify_url)
+            # HTTPException 시 BackgroundTasks가 실행되지 않으므로 여기서 직접 호출
+            if settings.email_dev_mode:
+                logger.warning(
+                    "EMAIL DEV MODE (register-resend) | To=%s | verify_url=%s",
+                    existing.email,
+                    verify_url,
+                )
+            else:
+                send_verification_email(existing.email, verify_url)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="이미 가입된 이메일입니다. 인증 메일을 다시 보냈습니다.",
@@ -88,6 +99,13 @@ def register(
 
     raw_token = create_and_store_verification_token(db, user)
     verify_url = build_verification_url(raw_token)
+    # BackgroundTasks는 응답 후에 실행됨. DEV면 요청 중에 바로 남겨 Render Logs에서 보이게 함.
+    if settings.email_dev_mode:
+        logger.warning(
+            "EMAIL DEV MODE (register) | To=%s | verify_url=%s",
+            user.email,
+            verify_url,
+        )
     background_tasks.add_task(send_verification_email, user.email, verify_url)
 
     return user

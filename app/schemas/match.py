@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, Field, field_validator
 
 
 class MatchMemberSummary(BaseModel):
@@ -24,6 +24,8 @@ class MatchDetailResponse(BaseModel):
     accept_deadline: datetime | None
     created_at: datetime
     confirmed_at: datetime | None
+    completed_at: datetime | None = None
+    evaluation_deadline: datetime | None = None
     my_accept_status: str | None = None
 
 
@@ -49,3 +51,51 @@ class MatchActionResponse(BaseModel):
     status: str
     my_accept_status: str
     message: str
+
+
+class EvaluationItem(BaseModel):
+    target_user_id: int
+    manner_delta: int = Field(description="-1, 0, 1")
+
+    @field_validator("manner_delta")
+    @classmethod
+    def validate_delta(cls, v: int) -> int:
+        if v not in (-1, 0, 1):
+            raise ValueError("manner_delta는 -1, 0, 1 만 가능합니다.")
+        return v
+
+
+class MatchEvaluateRequest(BaseModel):
+    evaluations: list[EvaluationItem]
+
+
+class MatchEvaluateResponse(BaseModel):
+    match_id: int
+    submitted_count: int
+    message: str
+
+
+class EvaluationStatusResponse(BaseModel):
+    match_id: int
+    required_count: int
+    submitted_count: int
+    is_complete: bool
+    evaluation_deadline: datetime | None = None
+    seconds_remaining: int = 0
+
+
+class MatchHistoryItem(BaseModel):
+    match_id: int
+    game: str
+    status: str
+    my_assigned_role: str
+    my_tier: str
+    member_count: int
+    confirmed_at: datetime | None
+    completed_at: datetime | None
+    evaluation_submitted: bool
+
+
+class MatchHistoryResponse(BaseModel):
+    total: int
+    items: list[MatchHistoryItem]

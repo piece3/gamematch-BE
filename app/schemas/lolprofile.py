@@ -3,8 +3,9 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-class LoLTier(str,Enum):
-    UN_RANK="UN_RANKED"
+
+class LoLTier(str, Enum):
+    UN_RANK = "UN_RANKED"
     IRON = "IRON"
     BRONZE = "BRONZE"
     SILVER = "SILVER"
@@ -17,7 +18,7 @@ class LoLTier(str,Enum):
     CHALLENGER = "CHALLENGER"
 
 
-class LoLPosition(str,Enum):
+class LoLPosition(str, Enum):
     TOP = "TOP"
     JUNGLE = "JUNGLE"
     MID = "MID"
@@ -31,7 +32,8 @@ ALLOWED_PLAY_STYLES = {
     "승리우선",
     "친목",
     "초보환영",
-    }
+}
+
 
 class ProfileMeUpdate(BaseModel):
     """PATCH /profile/me"""
@@ -44,10 +46,12 @@ class ProfileMeUpdate(BaseModel):
 class GameSettingsUpdate(BaseModel):
     """PATCH /profile/game-settings """
 
-    tier: LoLTier
+    tier: LoLTier | None = None
     primary_position: LoLPosition
     secondary_position: LoLPosition
     play_styles: list[str] = Field(default_factory=list, max_length=5)
+    riot_id: str | None = Field(default=None, max_length=50)
+    sync_tier_from_riot: bool = False
 
     @field_validator("play_styles")
     @classmethod
@@ -58,6 +62,12 @@ class GameSettingsUpdate(BaseModel):
         return v
 
 
+class RiotSyncRequest(BaseModel):
+    """POST /profile/riot/sync — Riot ID 저장 + 티어 동기화"""
+
+    riot_id: str = Field(min_length=3, max_length=50)
+
+
 class LolProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -65,6 +75,9 @@ class LolProfileResponse(BaseModel):
     primary_position: str
     secondary_position: str
     play_styles: list[str] | None
+    tier_rank: int = 0
+    riot_id: str | None = None
+    tier_updated_at: datetime | None = None
     updated_at: datetime | None = None
 
 
@@ -75,6 +88,7 @@ class ProfileMeResponse(BaseModel):
     email: str
     nickname: str
     discord_id: str | None
+    college: str
     department: str
     voice_chat_enable: bool
     manner_score: float

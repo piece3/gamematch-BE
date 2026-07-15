@@ -1,7 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -9,16 +9,30 @@ from app.core.deps import get_current_user
 from app.database import get_db
 from app.models.lol_profile import LolProfile
 from app.models.match import Match, MatchMember
+from app.models.match_evaluation import MatchEvaluation
 from app.models.queue_entry import QueueEntry
 from app.models.user import User
 from app.schemas.match import (
     AcceptStatusResponse,
+    EvaluationStatusResponse,
     MatchActionResponse,
     MatchDetailResponse,
+    MatchEvaluateRequest,
+    MatchEvaluateResponse,
+    MatchHistoryItem,
+    MatchHistoryResponse,
     MatchMemberSummary,
     MatchMembersResponse,
 )
 from app.schemas.queue import QueueJoinResponse, QueueStatusResponse
+from app.services.manner import (
+    EVALUATION_TIMEOUT_HOURS,
+    apply_manner_delta,
+    count_evaluations_by_evaluator,
+    evaluation_deadline_passed,
+    finalize_missing_evaluations,
+    validate_evaluation_targets,
+)
 from app.services.matchmaking import (
     allowed_tier_delta,
     calc_elapsed_seconds,
@@ -65,6 +79,13 @@ def _get_member_or_403(db: Session, match_id: int, user_id: int) -> MatchMember:
     return member
 
 
+def _member_user_ids(db: Session, match_id: int) -> set[int]:
+    members = db.scalars(
+        select(MatchMember).where(MatchMember.match_id == match_id)
+    ).all()
+    return {m.user_id for m in members}
+
+
 def _expire_if_needed(db: Session, match: Match) -> None:
     if match.status != "pending_accept":
         return
@@ -87,6 +108,20 @@ def _find_active_match_for_user(db: Session, user_id: int) -> Match | None:
             Match.status.in_(("pending_accept", "confirmed")),
         )
         .order_by(Match.created_at.desc())
+    )
+
+
+def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailResponse:
+    return MatchDetailResponse(
+        id=match.id,
+        game=match.game,
+        status=match.status,
+        accept_deadline=match.accept_deadline,
+        created_at=match.created_at,
+        confirmed_at=match.confirmed_at,
+        completed_at=match.completed_at,
+        evaluation_deadline=match.evaluation_deadline,
+        my_accept_status=member.accept_status if member else None,
     )
 
 
@@ -144,9 +179,11 @@ def queue_status(
                 in_queue=False,
                 match_id=active_match.id,
                 match_status=active_match.status,
-                message="매칭이 성사되었습니다. 수락/거절을 진행하세요."
-                if active_match.status == "pending_accept"
-                else "매칭이 확정되었습니다.",
+                message=(
+                    "매칭이 성사되었습니다. 수락/거절을 진행하세요."
+                    if active_match.status == "pending_accept"
+                    else "매칭이 확정되었습니다."
+                ),
             )
 
     entry = db.scalar(
@@ -204,6 +241,73 @@ def leave_queue(
     db.commit()
 
 
+@router.get("/history", response_model=MatchHistoryResponse)
+def match_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> MatchHistoryResponse:
+    memberships = db.scalars(
+        select(MatchMember)
+        .join(Match, Match.id == MatchMember.match_id)
+        .where(
+            MatchMember.user_id == current_user.id,
+            Match.status.in_(("confirmed", "completed")),
+        )
+        .order_by(func.coalesce(Match.completed_at, Match.confirmed_at).desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    items: list[MatchHistoryItem] = []
+    for membership in memberships:
+        match = db.get(Match, membership.match_id)
+        if match is None:
+            continue
+        if match.status == "completed":
+            finalize_missing_evaluations(db, match)
+            db.refresh(match)
+
+        member_count = (
+            db.scalar(
+                select(func.count())
+                .select_from(MatchMember)
+                .where(MatchMember.match_id == match.id)
+            )
+            or 0
+        )
+        submitted = count_evaluations_by_evaluator(db, match.id, current_user.id) > 0
+        items.append(
+            MatchHistoryItem(
+                match_id=match.id,
+                game=match.game,
+                status=match.status,
+                my_assigned_role=membership.assigned_role,
+                my_tier=membership.tier,
+                member_count=member_count,
+                confirmed_at=match.confirmed_at,
+                completed_at=match.completed_at,
+                evaluation_submitted=submitted,
+            )
+        )
+
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(MatchMember)
+            .join(Match, Match.id == MatchMember.match_id)
+            .where(
+                MatchMember.user_id == current_user.id,
+                Match.status.in_(("confirmed", "completed")),
+            )
+        )
+        or 0
+    )
+
+    return MatchHistoryResponse(total=total, items=items)
+
+
 @router.get("/active", response_model=MatchDetailResponse | None)
 def get_active_match(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -219,15 +323,7 @@ def get_active_match(
         return None
 
     member = _get_member_or_403(db, match.id, current_user.id)
-    return MatchDetailResponse(
-        id=match.id,
-        game=match.game,
-        status=match.status,
-        accept_deadline=match.accept_deadline,
-        created_at=match.created_at,
-        confirmed_at=match.confirmed_at,
-        my_accept_status=member.accept_status,
-    )
+    return _to_match_detail(match, member)
 
 
 @router.get("/{match_id}", response_model=MatchDetailResponse)
@@ -240,16 +336,10 @@ def get_match(
     member = _get_member_or_403(db, match_id, current_user.id)
     _expire_if_needed(db, match)
     db.refresh(match)
-
-    return MatchDetailResponse(
-        id=match.id,
-        game=match.game,
-        status=match.status,
-        accept_deadline=match.accept_deadline,
-        created_at=match.created_at,
-        confirmed_at=match.confirmed_at,
-        my_accept_status=member.accept_status,
-    )
+    if match.status == "completed":
+        finalize_missing_evaluations(db, match)
+        db.refresh(match)
+    return _to_match_detail(match, member)
 
 
 @router.get("/{match_id}/members", response_model=MatchMembersResponse)
@@ -327,7 +417,9 @@ def accept_status(
         pending_count=pending,
         declined_count=declined,
         seconds_remaining=seconds_remaining,
-        all_accepted=(pending == 0 and declined == 0 and accepted == len(members) and len(members) > 0),
+        all_accepted=(
+            pending == 0 and declined == 0 and accepted == len(members) and len(members) > 0
+        ),
     )
 
 
@@ -433,4 +525,155 @@ def decline_match(
         status="cancelled",
         my_accept_status="declined",
         message="거절했습니다. 매칭이 취소되고 대기열로 돌아갑니다.",
+    )
+
+
+@router.post("/{match_id}/complete", response_model=MatchDetailResponse)
+def complete_match(
+    match_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> MatchDetailResponse:
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
+        )
+
+    match = _get_match_or_404(db, match_id)
+    member = _get_member_or_403(db, match_id, current_user.id)
+
+    if match.status == "completed":
+        return _to_match_detail(match, member)
+
+    if match.status != "confirmed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="confirmed 상태의 매칭만 완료할 수 있습니다.",
+        )
+
+    now = datetime.now(UTC)
+    match.status = "completed"
+    match.completed_at = now
+    match.completed_by_user_id = current_user.id
+    match.evaluation_deadline = now + timedelta(hours=EVALUATION_TIMEOUT_HOURS)
+
+    # 완료 후 재참가 가능하도록 큐 entry 정리
+    member_ids = _member_user_ids(db, match_id)
+    for uid in member_ids:
+        entry = db.scalar(select(QueueEntry).where(QueueEntry.user_id == uid))
+        if entry is not None:
+            db.delete(entry)
+
+    db.commit()
+    db.refresh(match)
+    return _to_match_detail(match, member)
+
+
+@router.post("/{match_id}/evaluate", response_model=MatchEvaluateResponse)
+def evaluate_match(
+    match_id: int,
+    payload: MatchEvaluateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> MatchEvaluateResponse:
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="이메일 인증 후 매칭을 이용할 수 있습니다.",
+        )
+
+    match = _get_match_or_404(db, match_id)
+    _get_member_or_403(db, match_id, current_user.id)
+
+    if match.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="게임 완료 후에만 평가할 수 있습니다.",
+        )
+
+    finalize_missing_evaluations(db, match)
+    db.refresh(match)
+
+    if evaluation_deadline_passed(match):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="평가 기한이 지났습니다. 미제출분은 3점으로 기록되었습니다.",
+        )
+
+    existing = count_evaluations_by_evaluator(db, match_id, current_user.id)
+    if existing > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 평가를 제출했습니다.",
+        )
+
+    member_ids = _member_user_ids(db, match_id)
+    targets = [
+        {"target_user_id": item.target_user_id, "manner_delta": item.manner_delta}
+        for item in payload.evaluations
+    ]
+    try:
+        validate_evaluation_targets(member_ids, current_user.id, targets)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    for item in payload.evaluations:
+        db.add(
+            MatchEvaluation(
+                match_id=match_id,
+                evaluator_user_id=current_user.id,
+                target_user_id=item.target_user_id,
+                manner_delta=item.manner_delta,
+            )
+        )
+        target = db.get(User, item.target_user_id)
+        if target is not None:
+            target.manner_score = apply_manner_delta(
+                target.manner_score, item.manner_delta
+            )
+
+    db.commit()
+
+    return MatchEvaluateResponse(
+        match_id=match_id,
+        submitted_count=len(payload.evaluations),
+        message="평가가 제출되었습니다.",
+    )
+
+
+@router.get("/{match_id}/evaluations/status", response_model=EvaluationStatusResponse)
+def evaluation_status(
+    match_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> EvaluationStatusResponse:
+    match = _get_match_or_404(db, match_id)
+    _get_member_or_403(db, match_id, current_user.id)
+
+    if match.status == "completed":
+        finalize_missing_evaluations(db, match)
+        db.refresh(match)
+
+    member_count = len(_member_user_ids(db, match_id))
+    required = max(0, member_count - 1)
+    submitted = count_evaluations_by_evaluator(db, match_id, current_user.id)
+
+    seconds_remaining = 0
+    if match.evaluation_deadline is not None and match.status == "completed":
+        deadline = match.evaluation_deadline
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        seconds_remaining = max(0, int((deadline - datetime.now(UTC)).total_seconds()))
+
+    return EvaluationStatusResponse(
+        match_id=match.id,
+        required_count=required,
+        submitted_count=min(submitted, required),
+        is_complete=submitted >= required and required > 0,
+        evaluation_deadline=match.evaluation_deadline,
+        seconds_remaining=seconds_remaining,
     )

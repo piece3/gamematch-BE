@@ -1,9 +1,11 @@
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.deps import get_current_user
 from app.database import get_db
 from app.models.lol_profile import LolProfile
@@ -13,24 +15,30 @@ from app.schemas.lolprofile import (
     LolProfileResponse,
     ProfileMeResponse,
     ProfileMeUpdate,
+    RiotSyncRequest,
 )
+from app.services.ranking import tier_to_ranking_score
+from app.services.riot import RiotApiError, fetch_rank_by_riot_id
 
-router = APIRouter(prefix="/profile", tags = ["profile"])
+router = APIRouter(prefix="/profile", tags=["profile"])
+
 
 def _get_or_create_lol_profile(db: Session, user_id: int) -> LolProfile:
     profile = db.scalar(select(LolProfile).where(LolProfile.user_id == user_id))
     if profile is None:
         profile = LolProfile(
-            user_id = user_id,
+            user_id=user_id,
             tier="UN_RANKED",
+            tier_rank=0,
             primary_position="ANYTHING",
-            secondary_position ="ANYTHING",
+            secondary_position="ANYTHING",
             play_styles=[],
-            )
+        )
         db.add(profile)
         db.commit()
         db.refresh(profile)
     return profile
+
 
 def _to_profile_response(user: User, lol_profile: LolProfile | None) -> ProfileMeResponse:
     return ProfileMeResponse(
@@ -45,20 +53,50 @@ def _to_profile_response(user: User, lol_profile: LolProfile | None) -> ProfileM
         lol_profile=LolProfileResponse.model_validate(lol_profile) if lol_profile else None,
     )
 
+
+def _apply_riot_rank(profile: LolProfile, riot_id: str) -> None:
+    result = fetch_rank_by_riot_id(riot_id)
+    profile.riot_id = result.riot_id
+    profile.puuid = result.puuid
+    profile.tier = result.tier
+    profile.tier_rank = tier_to_ranking_score(result.tier)
+    profile.tier_updated_at = datetime.now(UTC)
+
+
+def _refresh_allowed(profile: LolProfile, *, force: bool) -> None:
+    if force:
+        return
+    if profile.tier_updated_at is None:
+        return
+    updated = profile.tier_updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    hours = settings.riot_tier_refresh_hours
+    if datetime.now(UTC) - updated < timedelta(hours=hours):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"티어는 {hours}시간(약 3일)에 한 번만 갱신할 수 있습니다. "
+                f"강제 갱신은 ?force=true"
+            ),
+        )
+
+
 @router.get("/me", response_model=ProfileMeResponse)
 def get_profile_me(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-    ) -> ProfileMeResponse:
+) -> ProfileMeResponse:
     lol_profile = db.scalar(select(LolProfile).where(LolProfile.user_id == current_user.id))
     return _to_profile_response(current_user, lol_profile)
+
 
 @router.patch("/me", response_model=ProfileMeResponse)
 def update_profile_me(
     payload: ProfileMeUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[Session,Depends(get_db)],
-    ) -> ProfileMeResponse:
+    db: Annotated[Session, Depends(get_db)],
+) -> ProfileMeResponse:
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(current_user, key, value)
@@ -69,21 +107,100 @@ def update_profile_me(
     lol_profile = db.scalar(select(LolProfile).where(LolProfile.user_id == current_user.id))
     return _to_profile_response(current_user, lol_profile)
 
+
 @router.patch("/game-settings", response_model=ProfileMeResponse)
 def update_game_settings(
     payload: GameSettingsUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-    ) -> ProfileMeResponse:
-    profile = _get_or_create_lol_profile(db,current_user.id)
+) -> ProfileMeResponse:
+    profile = _get_or_create_lol_profile(db, current_user.id)
 
-    profile.tier = payload.tier.value
     profile.primary_position = payload.primary_position.value
     profile.secondary_position = payload.secondary_position.value
     profile.play_styles = payload.play_styles
+
+    if payload.riot_id is not None:
+        profile.riot_id = payload.riot_id.strip() or None
+
+    if payload.sync_tier_from_riot:
+        if not profile.riot_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Riot 티어 동기화에는 riot_id가 필요합니다. (예: 닉네임#KR1)",
+            )
+        try:
+            _apply_riot_rank(profile, profile.riot_id)
+        except RiotApiError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+    elif payload.tier is not None:
+        profile.tier = payload.tier.value
+        profile.tier_rank = tier_to_ranking_score(profile.tier)
+    elif not profile.tier:
+        profile.tier = "UN_RANKED"
+        profile.tier_rank = 0
 
     db.commit()
     db.refresh(profile)
     db.refresh(current_user)
 
+    return _to_profile_response(current_user, profile)
+
+
+@router.post("/riot/sync", response_model=ProfileMeResponse)
+def sync_riot_profile(
+    payload: RiotSyncRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProfileMeResponse:
+    """Riot ID 저장 + 솔랭 티어 즉시 동기화."""
+    profile = _get_or_create_lol_profile(db, current_user.id)
+    try:
+        _apply_riot_rank(profile, payload.riot_id)
+    except RiotApiError as exc:
+        code = status.HTTP_400_BAD_REQUEST
+        if exc.status_code == 429:
+            code = status.HTTP_429_TOO_MANY_REQUESTS
+        elif exc.status_code in (401, 403):
+            code = status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+    db.commit()
+    db.refresh(profile)
+    db.refresh(current_user)
+    return _to_profile_response(current_user, profile)
+
+
+@router.post("/riot/refresh", response_model=ProfileMeResponse)
+def refresh_riot_tier(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    force: Annotated[bool, Query()] = False,
+) -> ProfileMeResponse:
+    """저장된 riot_id로 티어 재조회 (기본 72시간에 1회)."""
+    profile = _get_or_create_lol_profile(db, current_user.id)
+    if not profile.riot_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="먼저 POST /profile/riot/sync 로 Riot ID를 등록하세요.",
+        )
+
+    _refresh_allowed(profile, force=force)
+
+    try:
+        _apply_riot_rank(profile, profile.riot_id)
+    except RiotApiError as exc:
+        code = status.HTTP_400_BAD_REQUEST
+        if exc.status_code == 429:
+            code = status.HTTP_429_TOO_MANY_REQUESTS
+        elif exc.status_code in (401, 403):
+            code = status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+    db.commit()
+    db.refresh(profile)
+    db.refresh(current_user)
     return _to_profile_response(current_user, profile)
