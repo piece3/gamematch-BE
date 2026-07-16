@@ -109,6 +109,7 @@ def test_concurrent_matchmaking_creates_only_one_match(
             QueueEntry(
                 user_id=user.id,
                 game="lol",
+                game_mode="SOLO",
                 tier="SILVER",
                 tier_rank=3,
                 position=role,

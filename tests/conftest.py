@@ -44,8 +44,8 @@ def clean_database() -> Generator[None, None, None]:
         connection.execute(
             text(
                 "TRUNCATE TABLE "
-                "match_evaluations, match_members, matches, queue_entries, "
-                "lol_profiles, email_verification_tokens, users "
+                "user_match_records, match_evaluations, match_members, matches, "
+                "queue_entries, lol_profiles, email_verification_tokens, users "
                 "RESTART IDENTITY CASCADE"
             )
         )

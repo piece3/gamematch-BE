@@ -136,17 +136,32 @@ def _group_style_score(entries: list[QueueEntry]) -> int:
     )
 
 
-def try_form_match(db: Session, game: str = "lol") -> Match | None:
+def try_form_match(
+    db: Session,
+    game: str = "lol",
+    game_mode: str | None = None,
+) -> Match | None:
+    if game_mode is None:
+        # When status polls without a mode, try each mode once under its own lock.
+        formed = None
+        for mode in ("SOLO", "FLEX", "NORMAL"):
+            formed = try_form_match(db, game=game, game_mode=mode) or formed
+        return formed
+
     lock_acquired = db.scalar(
         text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_name))"),
-        {"lock_name": f"matchmaking:{game}"},
+        {"lock_name": f"matchmaking:{game}:{game_mode}"},
     )
     if not lock_acquired:
         return None
 
     waiting = db.scalars(
         select(QueueEntry)
-        .where(QueueEntry.status == "waiting", QueueEntry.game == game)
+        .where(
+            QueueEntry.status == "waiting",
+            QueueEntry.game == game,
+            QueueEntry.game_mode == game_mode,
+        )
         .order_by(QueueEntry.joined_at.asc())
         .limit(MAX_MATCH_CANDIDATES)
         .with_for_update(skip_locked=True)
@@ -176,7 +191,7 @@ def try_form_match(db: Session, game: str = "lol") -> Match | None:
 
     if best is None:
         return None
-    return _create_match_session(db, best[1], best[2], game)
+    return _create_match_session(db, best[1], best[2], game, game_mode)
 
 
 def _create_match_session(
@@ -184,12 +199,15 @@ def _create_match_session(
     entries: list,
     roles: dict[int, str],
     game: str,
+    game_mode: str,
 ) -> Match:
     now = datetime.now(UTC)
     match = Match(
         game=game,
+        game_mode=game_mode,
         status="pending_accept",
         accept_deadline=now + timedelta(seconds=ACCEPT_TIMEOUT_SECONDS),
+        result_status="pending",
     )
     db.add(match)
     db.flush()

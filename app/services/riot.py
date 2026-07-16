@@ -6,7 +6,6 @@ API 키는 환경변수 RIOT_API_KEY 만 사용. 소스에 하드코딩하지 �
 from __future__ import annotations
 
 import logging
-import secrets
 import time
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -163,42 +162,6 @@ def fetch_account_by_riot_id(riot_id: str) -> dict:
     return data
 
 
-def verify_riot_account_ownership(
-    puuid: str,
-    verification_code: str,
-) -> bool:
-    """Verify the code configured in the League client for this summoner."""
-    platform = settings.riot_platform
-    summoner_url = (
-        f"https://{platform}.api.riotgames.com/lol/summoner/v4/"
-        f"summoners/by-puuid/{quote(puuid, safe='')}"
-    )
-    summoner = _get_json(summoner_url)
-    if not isinstance(summoner, dict) or not summoner.get("id"):
-        raise RiotApiError("Riot Summoner API 응답이 올바르지 않습니다.")
-
-    summoner_id = str(summoner["id"])
-    code_url = (
-        f"https://{platform}.api.riotgames.com/lol/platform/v4/"
-        f"third-party-code/by-summoner/{quote(summoner_id, safe='')}"
-    )
-    try:
-        stored_code = _get_json(code_url)
-    except RiotApiError as exc:
-        if exc.status_code == 404:
-            raise RiotApiError(
-                "LoL 클라이언트에 Third Party Code를 먼저 설정하세요.",
-                status_code=400,
-            ) from exc
-        raise
-    if not isinstance(stored_code, str):
-        raise RiotApiError("Riot Third Party Code 응답이 올바르지 않습니다.")
-    return secrets.compare_digest(
-        stored_code.strip(),
-        verification_code.strip(),
-    )
-
-
 def fetch_solo_rank_by_puuid(
     puuid: str,
 ) -> tuple[str, str | None, int | None]:
@@ -248,3 +211,39 @@ def fetch_rank_by_riot_id(riot_id: str) -> RiotRankResult:
         league_points=league_points,
         queue_type=SOLO_QUEUE if tier != "UN_RANKED" else None,
     )
+
+
+def fetch_recent_match_ids(
+    puuid: str,
+    *,
+    queue_id: int,
+    count: int = 5,
+    start_time_ms: int | None = None,
+    end_time_ms: int | None = None,
+) -> list[str]:
+    regional = settings.riot_regional
+    params = [f"queue={queue_id}", f"start=0", f"count={count}"]
+    if start_time_ms is not None:
+        params.append(f"startTime={start_time_ms}")
+    if end_time_ms is not None:
+        params.append(f"endTime={end_time_ms}")
+    url = (
+        f"https://{regional}.api.riotgames.com/lol/match/v5/matches/by-puuid/"
+        f"{quote(puuid, safe='')}/ids?{'&'.join(params)}"
+    )
+    data = _get_json(url)
+    if not isinstance(data, list):
+        raise RiotApiError("Riot Match list 응답이 올바르지 않습니다.")
+    return [str(item) for item in data]
+
+
+def fetch_match_detail(riot_match_id: str) -> dict:
+    regional = settings.riot_regional
+    url = (
+        f"https://{regional}.api.riotgames.com/lol/match/v5/matches/"
+        f"{quote(riot_match_id, safe='')}"
+    )
+    data = _get_json(url)
+    if not isinstance(data, dict):
+        raise RiotApiError("Riot Match detail 응답이 올바르지 않습니다.")
+    return data

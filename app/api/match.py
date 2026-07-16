@@ -24,14 +24,24 @@ from app.schemas.match import (
     MatchHistoryResponse,
     MatchMemberSummary,
     MatchMembersResponse,
+    PersonalRecordItem,
+    PersonalRecordsResponse,
 )
-from app.schemas.queue import QueueJoinResponse, QueueStatusResponse
+from app.schemas.queue import (
+    QueueJoinRequest,
+    QueueJoinResponse,
+    QueueStatusResponse,
+)
 from app.services.manner import (
     EVALUATION_TIMEOUT_HOURS,
     apply_manner_deltas,
     count_evaluations_by_evaluator,
     evaluation_deadline_passed,
     validate_evaluation_targets,
+)
+from app.services.match_results import (
+    list_user_match_records,
+    sync_match_result_from_riot,
 )
 from app.services.matchmaking import (
     allowed_tier_delta,
@@ -40,6 +50,7 @@ from app.services.matchmaking import (
     tier_to_rank,
     try_form_match,
 )
+from app.models.user_match_record import MAX_RECORDS_PER_USER, UserMatchRecord
 
 router = APIRouter(prefix="/match", tags=["match"])
 
@@ -162,6 +173,7 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
     return MatchDetailResponse(
         id=match.id,
         game=match.game,
+        game_mode=match.game_mode,
         status=match.status,
         accept_deadline=match.accept_deadline,
         created_at=match.created_at,
@@ -169,11 +181,14 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
         completed_at=match.completed_at,
         evaluation_deadline=match.evaluation_deadline,
         my_accept_status=member.accept_status if member else None,
+        riot_match_id=match.riot_match_id,
+        result_status=match.result_status,
     )
 
 
 @router.post("/queue/join", response_model=QueueJoinResponse, status_code=status.HTTP_201_CREATED)
 def join_queue(
+    payload: QueueJoinRequest,
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> QueueEntry:
@@ -220,6 +235,7 @@ def join_queue(
         entry = existing
 
     entry.game = "lol"
+    entry.game_mode = payload.game_mode.value
     entry.tier = lol_profile.tier
     entry.tier_rank = tier_to_rank(lol_profile.tier)
     entry.position = lol_profile.primary_position
@@ -237,7 +253,7 @@ def join_queue(
         ) from exc
     db.refresh(entry)
 
-    try_form_match(db)
+    try_form_match(db, game_mode=entry.game_mode)
     db.refresh(entry)
     return entry
 
@@ -295,7 +311,11 @@ def queue_status(
         db.scalar(
             select(func.count())
             .select_from(QueueEntry)
-            .where(QueueEntry.status == "waiting", QueueEntry.game == "lol")
+            .where(
+                QueueEntry.status == "waiting",
+                QueueEntry.game == "lol",
+                QueueEntry.game_mode == entry.game_mode,
+            )
         )
         or 0
     )
@@ -304,6 +324,7 @@ def queue_status(
         in_queue=True,
         status=entry.status,
         game=entry.game,
+        game_mode=entry.game_mode,
         tier=entry.tier,
         tier_rank=entry.tier_rank,
         position=entry.position,
@@ -380,6 +401,7 @@ def match_history(
             MatchHistoryItem(
                 match_id=match.id,
                 game=match.game,
+                game_mode=match.game_mode,
                 status=match.status,
                 my_assigned_role=membership.assigned_role,
                 my_tier=membership.tier,
@@ -387,6 +409,15 @@ def match_history(
                 confirmed_at=match.confirmed_at,
                 completed_at=match.completed_at,
                 evaluation_submitted=submitted,
+                won=(
+                    db.scalar(
+                        select(UserMatchRecord.won).where(
+                            UserMatchRecord.user_id == current_user.id,
+                            UserMatchRecord.match_id == match.id,
+                        )
+                    )
+                ),
+                result_status=match.result_status,
             )
         )
 
@@ -404,6 +435,29 @@ def match_history(
     )
 
     return MatchHistoryResponse(total=total, items=items)
+
+
+@router.get("/records", response_model=PersonalRecordsResponse)
+def personal_match_records(
+    current_user: Annotated[User, Depends(get_current_verified_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PersonalRecordsResponse:
+    """인당 최근 전적 최대 5개 (Riot 동기화 결과)."""
+    records = list_user_match_records(db, current_user.id)
+    return PersonalRecordsResponse(
+        total=len(records),
+        limit=MAX_RECORDS_PER_USER,
+        items=[
+            PersonalRecordItem(
+                match_id=record.match_id,
+                riot_match_id=record.riot_match_id,
+                game_mode=record.game_mode,
+                won=record.won,
+                played_at=record.played_at,
+            )
+            for record in records
+        ],
+    )
 
 
 @router.get("/active", response_model=MatchDetailResponse | None)
@@ -643,6 +697,11 @@ def complete_match(
         if entry is not None:
             db.delete(entry)
 
+    sync_match_result_from_riot(
+        db,
+        match,
+        preferred_user_id=current_user.id,
+    )
     db.commit()
     db.refresh(match)
     return _to_match_detail(match, member)

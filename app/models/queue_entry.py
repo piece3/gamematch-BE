@@ -21,9 +21,14 @@ class QueueEntry(Base):
             "status IN ('waiting', 'matched')",
             name="ck_queue_entries_status",
         ),
+        CheckConstraint(
+            "game_mode IN ('SOLO', 'FLEX', 'NORMAL')",
+            name="ck_queue_entries_game_mode",
+        ),
         Index(
-            "ix_queue_entries_game_status_joined",
+            "ix_queue_entries_game_mode_status_joined",
             "game",
+            "game_mode",
             "status",
             "joined_at",
         ),
@@ -36,6 +41,9 @@ class QueueEntry(Base):
         nullable=False,
         )
     game: Mapped[str] = mapped_column(String(20),default="lol",nullable=False)
+    game_mode: Mapped[str] = mapped_column(
+        String(20), default="SOLO", nullable=False
+    )
     tier: Mapped[str] = mapped_column(String(20),nullable=False)
     tier_rank: Mapped[int] = mapped_column(Integer, nullable=False)
     position: Mapped[str] = mapped_column(String(20),nullable=False)

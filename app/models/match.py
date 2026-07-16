@@ -22,11 +22,26 @@ class Match(Base):
             "status IN ('pending_accept', 'confirmed', 'cancelled', 'completed')",
             name="ck_matches_status",
         ),
+        CheckConstraint(
+            "game_mode IN ('SOLO', 'FLEX', 'NORMAL')",
+            name="ck_matches_game_mode",
+        ),
+        CheckConstraint(
+            "result_status IN ('pending', 'synced', 'unresolved')",
+            name="ck_matches_result_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     game: Mapped[str] = mapped_column(String(20), default="lol", nullable=False)
+    game_mode: Mapped[str] = mapped_column(
+        String(20), default="SOLO", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(30), nullable=False)
+    riot_match_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_status: Mapped[str] = mapped_column(
+        String(20), default="pending", nullable=False
+    )
     accept_deadline: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

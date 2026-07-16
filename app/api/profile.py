@@ -21,11 +21,7 @@ from app.schemas.lolprofile import (
 )
 from app.services.ranking import tier_to_ranking_score
 from app.services.matchmaking import tier_to_rank
-from app.services.riot import (
-    RiotApiError,
-    fetch_rank_by_riot_id,
-    verify_riot_account_ownership,
-)
+from app.services.riot import RiotApiError, fetch_rank_by_riot_id
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -79,26 +75,8 @@ def _apply_riot_rank(
     db: Session,
     profile: LolProfile,
     riot_id: str,
-    verification_code: str | None = None,
 ) -> None:
     result = fetch_rank_by_riot_id(riot_id)
-    if profile.puuid != result.puuid:
-        if not verification_code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "새 Riot 계정 연결에는 LoL 클라이언트에 설정한 "
-                    "Third Party Code가 필요합니다."
-                ),
-            )
-        if not verify_riot_account_ownership(
-            result.puuid,
-            verification_code,
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Riot 계정 소유권 인증 코드가 일치하지 않습니다.",
-            )
     owner = db.scalar(
         select(LolProfile).where(
             LolProfile.puuid == result.puuid,
@@ -138,20 +116,24 @@ def _refresh_allowed(profile: LolProfile) -> None:
 
 def _raise_riot_http_error(exc: RiotApiError) -> None:
     code = status.HTTP_502_BAD_GATEWAY
+    detail = str(exc)
     if exc.status_code == 400:
         code = status.HTTP_400_BAD_REQUEST
     elif exc.status_code == 404:
         code = status.HTTP_404_NOT_FOUND
+        detail = "입력한 Riot ID 계정을 찾을 수 없습니다."
     elif exc.status_code == 429:
         code = status.HTTP_429_TOO_MANY_REQUESTS
     elif exc.status_code == 503:
         code = status.HTTP_503_SERVICE_UNAVAILABLE
+    if "Third Party Code" in detail:
+        detail = "Riot 계정 확인 방식이 변경되었습니다. Riot ID를 다시 확인해 주세요."
     headers = None
     if exc.retry_after is not None:
         headers = {"Retry-After": str(exc.retry_after)}
     raise HTTPException(
         status_code=code,
-        detail=str(exc),
+        detail=detail,
         headers=headers,
     ) from exc
 
@@ -219,12 +201,7 @@ def update_game_settings(
             )
         _refresh_allowed(profile)
         try:
-            _apply_riot_rank(
-                db,
-                profile,
-                requested_riot_id,
-                payload.riot_verification_code,
-            )
+            _apply_riot_rank(db, profile, requested_riot_id)
         except RiotApiError as exc:
             _raise_riot_http_error(exc)
     elif payload.riot_id is not None and requested_riot_id != profile.riot_id:
@@ -254,12 +231,7 @@ def sync_riot_profile(
     profile = _get_or_create_lol_profile(db, current_user.id)
     _refresh_allowed(profile)
     try:
-        _apply_riot_rank(
-            db,
-            profile,
-            payload.riot_id,
-            payload.verification_code,
-        )
+        _apply_riot_rank(db, profile, payload.riot_id)
     except RiotApiError as exc:
         _raise_riot_http_error(exc)
 

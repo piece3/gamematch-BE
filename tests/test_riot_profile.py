@@ -40,25 +40,15 @@ def test_riot_sync_stores_full_rank_and_enforces_cooldown(
             league_points=73,
         ),
     )
-    monkeypatch.setattr(
-        "app.api.profile.verify_riot_account_ownership",
-        lambda _puuid, _code: True,
-    )
 
     first = client.post(
         "/profile/riot/sync",
-        json={
-            "riot_id": "Player#KR1",
-            "verification_code": "owned",
-        },
+        json={"riot_id": "Player#KR1"},
         headers=auth_headers(user),
     )
     second = client.post(
         "/profile/riot/sync",
-        json={
-            "riot_id": "Player#KR1",
-            "verification_code": "owned",
-        },
+        json={"riot_id": "Player#KR1"},
         headers=auth_headers(user),
     )
 
@@ -94,56 +84,20 @@ def test_same_riot_account_cannot_be_linked_twice(
             league_points=10,
         ),
     )
-    monkeypatch.setattr(
-        "app.api.profile.verify_riot_account_ownership",
-        lambda _puuid, _code: True,
-    )
 
     first = client.post(
         "/profile/riot/sync",
-        json={"riot_id": "One#KR1", "verification_code": "owned"},
+        json={"riot_id": "One#KR1"},
         headers=auth_headers(first_user),
     )
     second = client.post(
         "/profile/riot/sync",
-        json={"riot_id": "Two#KR1", "verification_code": "owned"},
+        json={"riot_id": "Two#KR1"},
         headers=auth_headers(second_user),
     )
 
     assert first.status_code == 200
     assert second.status_code == 409
-
-
-def test_new_riot_link_requires_matching_ownership_code(
-    client: TestClient,
-    user_factory,
-    auth_headers,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    user = user_factory(with_profile=True)
-    monkeypatch.setattr(
-        "app.api.profile.fetch_rank_by_riot_id",
-        lambda _: RiotRankResult(
-            riot_id="Player#KR1",
-            puuid="protected-puuid",
-            tier="SILVER",
-        ),
-    )
-    monkeypatch.setattr(
-        "app.api.profile.verify_riot_account_ownership",
-        lambda _puuid, _code: False,
-    )
-
-    response = client.post(
-        "/profile/riot/sync",
-        json={
-            "riot_id": "Player#KR1",
-            "verification_code": "wrong",
-        },
-        headers=auth_headers(user),
-    )
-
-    assert response.status_code == 403
 
 
 def test_riot_client_maps_full_rank(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,22 +133,6 @@ def test_riot_client_maps_full_rank(monkeypatch: pytest.MonkeyPatch) -> None:
         "III",
         44,
     )
-    mock_client.close()
-
-
-def test_riot_ownership_code_verification(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/summoner/v4/" in str(request.url):
-            return httpx.Response(200, json={"id": "summoner-id"})
-        return httpx.Response(200, json="client-code")
-
-    mock_client = httpx.Client(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(riot, "_client", mock_client)
-
-    assert riot.verify_riot_account_ownership("puuid", "client-code")
-    assert not riot.verify_riot_account_ownership("puuid", "wrong-code")
     mock_client.close()
 
 

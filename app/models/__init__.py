@@ -4,6 +4,7 @@ from app.models.match import Match, MatchMember
 from app.models.match_evaluation import MatchEvaluation
 from app.models.queue_entry import QueueEntry
 from app.models.user import User
+from app.models.user_match_record import UserMatchRecord
 
 __all__ = [
     "User",
@@ -13,4 +14,5 @@ __all__ = [
     "Match",
     "MatchMember",
     "MatchEvaluation",
+    "UserMatchRecord",
 ]

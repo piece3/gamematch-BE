@@ -17,6 +17,7 @@ def _create_and_match_five(client, user_factory, auth_headers):
     for user in users:
         response = client.post(
             "/match/queue/join",
+            json={"game_mode": "SOLO"},
             headers=auth_headers(user),
         )
         assert response.status_code == 201
@@ -36,6 +37,7 @@ def _create_and_match_five(client, user_factory, auth_headers):
     assert status_response.json()["match_id"] == active.json()["id"]
     duplicate_join = client.post(
         "/match/queue/join",
+        json={"game_mode": "SOLO"},
         headers=auth_headers(users[0]),
     )
     assert duplicate_join.status_code == 409

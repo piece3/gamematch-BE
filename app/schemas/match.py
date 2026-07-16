@@ -20,6 +20,7 @@ class MatchMemberSummary(BaseModel):
 class MatchDetailResponse(BaseModel):
     id: int
     game: str
+    game_mode: str | None = None
     status: str
     accept_deadline: datetime | None
     created_at: datetime
@@ -27,6 +28,8 @@ class MatchDetailResponse(BaseModel):
     completed_at: datetime | None = None
     evaluation_deadline: datetime | None = None
     my_accept_status: str | None = None
+    riot_match_id: str | None = None
+    result_status: str | None = None
 
 
 class MatchMembersResponse(BaseModel):
@@ -87,6 +90,7 @@ class EvaluationStatusResponse(BaseModel):
 class MatchHistoryItem(BaseModel):
     match_id: int
     game: str
+    game_mode: str | None = None
     status: str
     my_assigned_role: str
     my_tier: str
@@ -94,8 +98,24 @@ class MatchHistoryItem(BaseModel):
     confirmed_at: datetime | None
     completed_at: datetime | None
     evaluation_submitted: bool
+    won: bool | None = None
+    result_status: str | None = None
 
 
 class MatchHistoryResponse(BaseModel):
     total: int
     items: list[MatchHistoryItem]
+
+
+class PersonalRecordItem(BaseModel):
+    match_id: int
+    riot_match_id: str
+    game_mode: str
+    won: bool
+    played_at: datetime
+
+
+class PersonalRecordsResponse(BaseModel):
+    total: int
+    limit: int = 5
+    items: list[PersonalRecordItem]
