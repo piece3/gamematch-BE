@@ -128,3 +128,34 @@ def test_decliner_is_removed_and_other_members_are_requeued(
         .where(QueueEntry.status == "waiting")
     )
     assert waiting_count == 4
+
+
+def test_quick_message_buttons_only(
+    client: TestClient,
+    user_factory,
+    auth_headers,
+) -> None:
+    users, match_id = _create_and_match_five(client, user_factory, auth_headers)
+
+    send = client.post(
+        f"/match/{match_id}/quick-messages",
+        headers=auth_headers(users[0]),
+        json={"message": "게임 시작할게요"},
+    )
+    assert send.status_code == 200
+    assert send.json()["message"] == "게임 시작할게요"
+
+    invalid = client.post(
+        f"/match/{match_id}/quick-messages",
+        headers=auth_headers(users[0]),
+        json={"message": "자유 입력"},
+    )
+    assert invalid.status_code == 422
+
+    listed = client.get(
+        f"/match/{match_id}/quick-messages",
+        headers=auth_headers(users[1]),
+    )
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["message"] == "게임 시작할게요"

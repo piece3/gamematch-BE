@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -36,6 +37,32 @@ class MatchMembersResponse(BaseModel):
     match_id: int
     status: str
     members: list[MatchMemberSummary]
+
+
+class QuickMessagePreset(str, Enum):
+    STARTING = "게임 시작할게요"
+    ONE_MORE = "한 판 더 하실래요?"
+    SHORT_BREAK = "저는 잠시 휴식할게요."
+    DONE_TODAY = "저는 여기까지 하겠습니다."
+    THANKS = "감사합니다"
+
+
+class QuickMessageSendRequest(BaseModel):
+    message: QuickMessagePreset
+
+
+class QuickMessageItem(BaseModel):
+    id: int
+    match_id: int
+    user_id: int
+    nickname: str
+    message: str
+    created_at: datetime
+
+
+class QuickMessageListResponse(BaseModel):
+    total: int
+    items: list[QuickMessageItem]
 
 
 class AcceptStatusResponse(BaseModel):

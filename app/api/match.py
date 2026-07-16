@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.lol_profile import LolProfile
 from app.models.match import Match, MatchMember
 from app.models.match_evaluation import MatchEvaluation
+from app.models.match_quick_message import MatchQuickMessage
 from app.models.queue_entry import QueueEntry
 from app.models.user import User
 from app.schemas.match import (
@@ -26,6 +27,9 @@ from app.schemas.match import (
     MatchMembersResponse,
     PersonalRecordItem,
     PersonalRecordsResponse,
+    QuickMessageItem,
+    QuickMessageListResponse,
+    QuickMessageSendRequest,
 )
 from app.schemas.queue import (
     QueueJoinRequest,
@@ -530,6 +534,70 @@ def get_match_members(
         status=match.status,
         members=summaries,
     )
+
+
+@router.post("/{match_id}/quick-messages", response_model=QuickMessageItem)
+def send_quick_message(
+    match_id: int,
+    payload: QuickMessageSendRequest,
+    current_user: Annotated[User, Depends(get_current_verified_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> QuickMessageItem:
+    match = _get_match_or_404(db, match_id)
+    _get_member_or_403(db, match_id, current_user.id)
+    if match.status not in ("pending_accept", "confirmed", "completed"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="퀵 메시지를 보낼 수 있는 매칭 상태가 아닙니다.",
+        )
+
+    message = MatchQuickMessage(
+        match_id=match_id,
+        user_id=current_user.id,
+        message=payload.message.value,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return QuickMessageItem(
+        id=message.id,
+        match_id=message.match_id,
+        user_id=message.user_id,
+        nickname=current_user.nickname,
+        message=message.message,
+        created_at=message.created_at,
+    )
+
+
+@router.get("/{match_id}/quick-messages", response_model=QuickMessageListResponse)
+def list_quick_messages(
+    match_id: int,
+    current_user: Annotated[User, Depends(get_current_verified_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> QuickMessageListResponse:
+    _get_match_or_404(db, match_id)
+    _get_member_or_403(db, match_id, current_user.id)
+    rows = db.scalars(
+        select(MatchQuickMessage)
+        .where(MatchQuickMessage.match_id == match_id)
+        .order_by(MatchQuickMessage.created_at.desc(), MatchQuickMessage.id.desc())
+        .limit(limit)
+    ).all()
+    items = []
+    for row in reversed(rows):
+        sender = db.get(User, row.user_id)
+        items.append(
+            QuickMessageItem(
+                id=row.id,
+                match_id=row.match_id,
+                user_id=row.user_id,
+                nickname=sender.nickname if sender else f"user-{row.user_id}",
+                message=row.message,
+                created_at=row.created_at,
+            )
+        )
+    return QuickMessageListResponse(total=len(items), items=items)
 
 
 @router.get("/{match_id}/accept-status", response_model=AcceptStatusResponse)
