@@ -23,8 +23,15 @@ class Match(Base):
             name="ck_matches_status",
         ),
         CheckConstraint(
-            "game_mode IN ('SOLO', 'FLEX', 'NORMAL')",
+            "(game = 'lol' AND game_mode IN ('SOLO', 'FLEX', 'Howling Abyss')) "
+            "OR (game = 'fc_online' AND game_mode IN ('OFFICIAL_1V1', 'OFFICIAL_2V2'))",
             name="ck_matches_game_mode",
+        ),
+        CheckConstraint(
+            "(game = 'lol' AND party_size = 1) "
+            "OR (game_mode = 'OFFICIAL_1V1' AND party_size = 1) "
+            "OR (game_mode = 'OFFICIAL_2V2' AND party_size = 2)",
+            name="ck_matches_party_size",
         ),
         CheckConstraint(
             "result_status IN ('pending', 'synced', 'unresolved')",
@@ -37,8 +44,10 @@ class Match(Base):
     game_mode: Mapped[str] = mapped_column(
         String(20), default="SOLO", nullable=False
     )
+    party_size: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     riot_match_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    nexon_match_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_status: Mapped[str] = mapped_column(
         String(20), default="pending", nullable=False
     )
@@ -86,7 +95,7 @@ class MatchMember(Base):
         index=True,
         nullable=False,
     )
-    tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[str] = mapped_column(String(50), nullable=False)
     tier_rank: Mapped[int] = mapped_column(Integer, nullable=False)
     position: Mapped[str] = mapped_column(String(20), nullable=False)
     play_styles: Mapped[list | None] = mapped_column(JSONB, nullable=True)

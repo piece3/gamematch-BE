@@ -14,6 +14,21 @@ from app.services.match_results import sync_match_result_from_riot
 ROLES = ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
 
 
+def test_join_queue_accepts_howling_abyss(
+    client: TestClient,
+    user_factory,
+    auth_headers,
+) -> None:
+    user = user_factory(with_profile=True)
+    response = client.post(
+        "/match/queue/join",
+        json={"game_mode": "Howling Abyss"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201
+    assert response.json()["game_mode"] == "Howling Abyss"
+
+
 def test_different_game_modes_do_not_match_together(
     client: TestClient,
     db: Session,

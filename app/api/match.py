@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_verified_user
 from app.database import get_db
+from app.models.fc_online_match_record import FcOnlineMatchRecord
+from app.models.fc_online_profile import FcOnlineProfile
 from app.models.lol_profile import LolProfile
 from app.models.match import Match, MatchMember
 from app.models.match_evaluation import MatchEvaluation
@@ -45,6 +47,7 @@ from app.services.manner import (
 )
 from app.services.match_results import (
     list_user_match_records,
+    sync_match_result_from_fc_online,
     sync_match_result_from_riot,
 )
 from app.services.matchmaking import (
@@ -65,6 +68,18 @@ def _get_lol_profile_or_400(db: Session, user_id: int) -> LolProfile:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="롤 프로필이 없습니다. 먼저 /profile/game-settings 를 설정하세요.",
+        )
+    return profile
+
+
+def _get_fc_profile_or_400(db: Session, user_id: int) -> FcOnlineProfile:
+    profile = db.scalar(
+        select(FcOnlineProfile).where(FcOnlineProfile.user_id == user_id)
+    )
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FC 온라인 프로필이 없습니다. 먼저 /profile/fc-online/sync를 호출하세요.",
         )
     return profile
 
@@ -178,6 +193,7 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
         id=match.id,
         game=match.game,
         game_mode=match.game_mode,
+        party_size=match.party_size,
         status=match.status,
         accept_deadline=match.accept_deadline,
         created_at=match.created_at,
@@ -186,15 +202,16 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
         evaluation_deadline=match.evaluation_deadline,
         my_accept_status=member.accept_status if member else None,
         riot_match_id=match.riot_match_id,
+        nexon_match_id=match.nexon_match_id,
         result_status=match.result_status,
     )
 
 
 @router.post("/queue/join", response_model=QueueJoinResponse, status_code=status.HTTP_201_CREATED)
 def join_queue(
-    payload: QueueJoinRequest,
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
+    payload: QueueJoinRequest = QueueJoinRequest(),
 ) -> QueueEntry:
     active_match = _find_live_active_match_for_user(db, current_user.id)
     if active_match is not None:
@@ -229,8 +246,6 @@ def join_queue(
                 ),
             )
 
-    lol_profile = _get_lol_profile_or_400(db, current_user.id)
-
     if existing is None:
         entry = QueueEntry(user_id=current_user.id)
         db.add(entry)
@@ -238,13 +253,27 @@ def join_queue(
         # A matched row without an active match is stale after a prior crash.
         entry = existing
 
-    entry.game = "lol"
-    entry.game_mode = payload.game_mode.value
-    entry.tier = lol_profile.tier
-    entry.tier_rank = tier_to_rank(lol_profile.tier)
-    entry.position = lol_profile.primary_position
-    entry.secondary_position = lol_profile.secondary_position
-    entry.play_styles = lol_profile.play_styles or []
+    entry.game = payload.game.value
+    entry.game_mode = payload.game_mode
+    entry.party_size = payload.party_size
+    if entry.game == "lol":
+        lol_profile = _get_lol_profile_or_400(db, current_user.id)
+        entry.tier = lol_profile.tier
+        entry.tier_rank = tier_to_rank(lol_profile.tier)
+        entry.position = lol_profile.primary_position
+        entry.secondary_position = lol_profile.secondary_position
+        entry.play_styles = lol_profile.play_styles or []
+    else:
+        fc_profile = _get_fc_profile_or_400(db, current_user.id)
+        if entry.game_mode == "OFFICIAL_1V1":
+            entry.tier = fc_profile.division_1v1_name or "UN_RANKED"
+            entry.tier_rank = fc_profile.division_1v1_rank or 0
+        else:
+            entry.tier = fc_profile.division_2v2_name or "UN_RANKED"
+            entry.tier_rank = fc_profile.division_2v2_rank or 0
+        entry.position = "ANYTHING"
+        entry.secondary_position = "ANYTHING"
+        entry.play_styles = []
     entry.status = "waiting"
     entry.joined_at = datetime.now(UTC)
     try:
@@ -257,7 +286,7 @@ def join_queue(
         ) from exc
     db.refresh(entry)
 
-    try_form_match(db, game_mode=entry.game_mode)
+    try_form_match(db, game=entry.game, game_mode=entry.game_mode)
     db.refresh(entry)
     return entry
 
@@ -268,6 +297,7 @@ def queue_status(
     db: Annotated[Session, Depends(get_db)],
 ) -> QueueStatusResponse:
     try_form_match(db)
+    try_form_match(db, game="fc_online")
 
     active_match = _find_live_active_match_for_user(db, current_user.id)
     if active_match is not None:
@@ -317,7 +347,7 @@ def queue_status(
             .select_from(QueueEntry)
             .where(
                 QueueEntry.status == "waiting",
-                QueueEntry.game == "lol",
+                QueueEntry.game == entry.game,
                 QueueEntry.game_mode == entry.game_mode,
             )
         )
@@ -329,6 +359,7 @@ def queue_status(
         status=entry.status,
         game=entry.game,
         game_mode=entry.game_mode,
+        party_size=entry.party_size,
         tier=entry.tier,
         tier_rank=entry.tier_rank,
         position=entry.position,
@@ -401,6 +432,21 @@ def match_history(
             )
             > 0
         )
+        if match.game == "lol":
+            won = db.scalar(
+                select(UserMatchRecord.won).where(
+                    UserMatchRecord.user_id == current_user.id,
+                    UserMatchRecord.match_id == match.id,
+                )
+            )
+        else:
+            fc_result = db.scalar(
+                select(FcOnlineMatchRecord.result).where(
+                    FcOnlineMatchRecord.user_id == current_user.id,
+                    FcOnlineMatchRecord.match_id == match.id,
+                )
+            )
+            won = None if fc_result is None or fc_result == "DRAW" else fc_result == "WIN"
         items.append(
             MatchHistoryItem(
                 match_id=match.id,
@@ -413,14 +459,7 @@ def match_history(
                 confirmed_at=match.confirmed_at,
                 completed_at=match.completed_at,
                 evaluation_submitted=submitted,
-                won=(
-                    db.scalar(
-                        select(UserMatchRecord.won).where(
-                            UserMatchRecord.user_id == current_user.id,
-                            UserMatchRecord.match_id == match.id,
-                        )
-                    )
-                ),
+                won=won,
                 result_status=match.result_status,
             )
         )
@@ -675,7 +714,12 @@ def accept_match(
     accepted_count = sum(m.accept_status == "accepted" for m in members)
     declined_count = sum(m.accept_status == "declined" for m in members)
 
-    if len(members) == 5 and accepted_count == 5 and declined_count == 0:
+    expected_members = 5 if match.game == "lol" else 2
+    if (
+        len(members) == expected_members
+        and accepted_count == expected_members
+        and declined_count == 0
+    ):
         match.status = "confirmed"
         match.confirmed_at = datetime.now(UTC)
 
@@ -765,11 +809,18 @@ def complete_match(
         if entry is not None:
             db.delete(entry)
 
-    sync_match_result_from_riot(
-        db,
-        match,
-        preferred_user_id=current_user.id,
-    )
+    if match.game == "lol":
+        sync_match_result_from_riot(
+            db,
+            match,
+            preferred_user_id=current_user.id,
+        )
+    else:
+        sync_match_result_from_fc_online(
+            db,
+            match,
+            preferred_user_id=current_user.id,
+        )
     db.commit()
     db.refresh(match)
     return _to_match_detail(match, member)

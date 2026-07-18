@@ -104,12 +104,12 @@ def _refresh_allowed(profile: LolProfile) -> None:
     updated = profile.tier_updated_at
     if updated.tzinfo is None:
         updated = updated.replace(tzinfo=UTC)
-    hours = settings.riot_tier_refresh_hours
-    if datetime.now(UTC) - updated < timedelta(hours=hours):
+    minutes = settings.riot_tier_refresh_minutes
+    if datetime.now(UTC) - updated < timedelta(minutes=minutes):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
-                f"티어는 {hours}시간에 한 번만 갱신할 수 있습니다."
+                f"티어는 {minutes}분에 한 번만 갱신할 수 있습니다."
             ),
         )
 
@@ -246,7 +246,7 @@ def refresh_riot_tier(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ProfileMeResponse:
-    """저장된 riot_id로 티어 재조회 (기본 72시간에 1회)."""
+    """저장된 riot_id로 티어 재조회 (기본 10분에 1회)."""
     profile = _get_or_create_lol_profile(db, current_user.id)
     if not profile.riot_id:
         raise HTTPException(

@@ -8,11 +8,25 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.fc_online_match_record import (
+    MAX_FC_ONLINE_RECORDS_PER_USER,
+    FcOnlineMatchRecord,
+)
+from app.models.fc_online_profile import FcOnlineProfile
 from app.models.lol_profile import LolProfile
 from app.models.match import Match, MatchMember
 from app.models.user_match_record import MAX_RECORDS_PER_USER, UserMatchRecord
 from app.schemas.queue import GAME_MODE_QUEUE_IDS, GameMode
 from app.services.riot import RiotApiError, fetch_match_detail, fetch_recent_match_ids
+from app.services.fc_online import (
+    MATCH_TYPE_1V1,
+    MATCH_TYPE_2V2,
+    FcOnlineApiError,
+    fetch_match_detail as fetch_fc_match_detail,
+    fetch_recent_match_ids as fetch_fc_recent_match_ids,
+    parse_api_datetime,
+    result_for_ouid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,3 +210,143 @@ def list_user_match_records(
             .limit(min(limit, MAX_RECORDS_PER_USER))
         ).all()
     )
+
+
+def _trim_fc_records(db: Session, user_id: int) -> None:
+    records = db.scalars(
+        select(FcOnlineMatchRecord)
+        .where(FcOnlineMatchRecord.user_id == user_id)
+        .order_by(
+            FcOnlineMatchRecord.played_at.desc(),
+            FcOnlineMatchRecord.id.desc(),
+        )
+    ).all()
+    for stale in records[MAX_FC_ONLINE_RECORDS_PER_USER:]:
+        db.delete(stale)
+
+
+def sync_match_result_from_fc_online(
+    db: Session,
+    match: Match,
+    *,
+    preferred_user_id: int | None = None,
+) -> bool:
+    """Find one common Nexon match for both representatives and save results."""
+    if match.result_status == "synced" and match.nexon_match_id:
+        return True
+    if match.game != "fc_online":
+        return False
+
+    members = db.scalars(
+        select(MatchMember).where(MatchMember.match_id == match.id)
+    ).all()
+    user_ids = [member.user_id for member in members]
+    profiles = db.scalars(
+        select(FcOnlineProfile).where(FcOnlineProfile.user_id.in_(user_ids))
+    ).all()
+    ouid_by_user = {
+        profile.user_id: profile.ouid for profile in profiles if profile.ouid
+    }
+    if len(ouid_by_user) != 2:
+        match.result_status = "unresolved"
+        return False
+
+    match_type = {
+        "OFFICIAL_1V1": MATCH_TYPE_1V1,
+        "OFFICIAL_2V2": MATCH_TYPE_2V2,
+    }.get(match.game_mode)
+    if match_type is None:
+        match.result_status = "unresolved"
+        return False
+
+    lookup_user_id = (
+        preferred_user_id
+        if preferred_user_id in ouid_by_user
+        else next(iter(ouid_by_user))
+    )
+    ordered_users = [lookup_user_id] + [
+        user_id for user_id in ouid_by_user if user_id != lookup_user_id
+    ]
+    confirmed_at = _as_utc(match.confirmed_at) or _as_utc(match.created_at)
+    completed_at = _as_utc(match.completed_at) or datetime.now(UTC)
+    if confirmed_at is None:
+        match.result_status = "unresolved"
+        return False
+
+    try:
+        ids_by_user = {
+            user_id: fetch_fc_recent_match_ids(
+                ouid_by_user[user_id],
+                match_type=match_type,
+                limit=10,
+            )
+            for user_id in ordered_users
+        }
+        common_ids = set(ids_by_user[ordered_users[0]]) & set(
+            ids_by_user[ordered_users[1]]
+        )
+        candidates = [
+            match_id
+            for match_id in ids_by_user[ordered_users[0]]
+            if match_id in common_ids
+        ]
+        expected_ouids = set(ouid_by_user.values())
+        for nexon_match_id in candidates:
+            detail = fetch_fc_match_detail(nexon_match_id)
+            if int(detail.get("matchType", -1)) != match_type:
+                continue
+            played_at = parse_api_datetime(detail.get("matchDate"))
+            if played_at is None:
+                continue
+            if played_at < confirmed_at - RESULT_LOOKBEHIND:
+                continue
+            if played_at > completed_at + RESULT_LOOKAHEAD:
+                continue
+
+            participants = detail.get("matchInfo")
+            if not isinstance(participants, list):
+                continue
+            participant_ouids = {
+                str(item.get("ouid"))
+                for item in participants
+                if isinstance(item, dict) and item.get("ouid")
+            }
+            if not expected_ouids.issubset(participant_ouids):
+                continue
+
+            results = {
+                user_id: result_for_ouid(detail, ouid)
+                for user_id, ouid in ouid_by_user.items()
+            }
+            if any(result is None for result in results.values()):
+                continue
+
+            for user_id, result in results.items():
+                existing = db.scalar(
+                    select(FcOnlineMatchRecord).where(
+                        FcOnlineMatchRecord.user_id == user_id,
+                        FcOnlineMatchRecord.nexon_match_id == nexon_match_id,
+                    )
+                )
+                if existing is None:
+                    db.add(
+                        FcOnlineMatchRecord(
+                            user_id=user_id,
+                            match_id=match.id,
+                            nexon_match_id=nexon_match_id,
+                            game_mode=match.game_mode,
+                            result=result,
+                            played_at=played_at,
+                        )
+                    )
+                    db.flush()
+                    _trim_fc_records(db, user_id)
+
+            match.nexon_match_id = nexon_match_id
+            match.result_status = "synced"
+            return True
+    except (FcOnlineApiError, TypeError, ValueError):
+        logger.exception("Failed to sync FC Online result for match_id=%s", match.id)
+
+    match.result_status = "unresolved"
+    return False

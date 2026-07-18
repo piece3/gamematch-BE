@@ -144,7 +144,12 @@ def try_form_match(
     if game_mode is None:
         # When status polls without a mode, try each mode once under its own lock.
         formed = None
-        for mode in ("SOLO", "FLEX", "NORMAL"):
+        modes = (
+            ("SOLO", "FLEX", "Howling Abyss")
+            if game == "lol"
+            else ("OFFICIAL_1V1", "OFFICIAL_2V2")
+        )
+        for mode in modes:
             formed = try_form_match(db, game=game, game_mode=mode) or formed
         return formed
 
@@ -167,19 +172,27 @@ def try_form_match(
         .with_for_update(skip_locked=True)
     ).all()
 
-    if len(waiting) < 5:
+    required_members = 5 if game == "lol" else 2
+    if len(waiting) < required_members:
         return None
 
     elapsed_map = {e.user_id: calc_elapsed_seconds(e.joined_at) for e in waiting}
 
     best: tuple[tuple[int, int, int], list[QueueEntry], dict[int, str]] | None = None
-    for group in combinations(waiting, 5):
+    for group in combinations(waiting, required_members):
         entries = list(group)
         if not group_tier_compatible(entries, elapsed_map):
             continue
-        roles = can_assign_roles(entries)
-        if roles is None:
-            continue
+        if game == "lol":
+            roles = can_assign_roles(entries)
+            if roles is None:
+                continue
+        else:
+            role_prefix = "PLAYER" if game_mode == "OFFICIAL_1V1" else "PARTY"
+            roles = {
+                entry.user_id: f"{role_prefix}_{index}"
+                for index, entry in enumerate(entries, start=1)
+            }
         ranks = [entry.tier_rank for entry in entries]
         score = (
             _group_style_score(entries),
@@ -205,6 +218,7 @@ def _create_match_session(
     match = Match(
         game=game,
         game_mode=game_mode,
+        party_size=entries[0].party_size,
         status="pending_accept",
         accept_deadline=now + timedelta(seconds=ACCEPT_TIMEOUT_SECONDS),
         result_status="pending",

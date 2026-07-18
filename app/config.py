@@ -3,7 +3,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #초기 세팅
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     environment: str = "development"
     database_url: str = "postgresql+psycopg2://gamematch:gamematch@localhost:5432/gamematch"
@@ -29,7 +33,11 @@ class Settings(BaseSettings):
     riot_api_key: str = ""
     riot_platform: str = "kr"  # kr, na1, ...
     riot_regional: str = "asia"  # asia, americas, europe
-    riot_tier_refresh_hours: int = 72  # 3일
+    riot_tier_refresh_minutes: int = 10
+    nexon_api_key: str = ""
+    fc_online_api_base_url: str = "https://open.api.nexon.com/fconline/v1"
+    fc_online_refresh_minutes: int = 10
+    fc_online_request_timeout_seconds: float = 15.0
     email_resend_cooldown_seconds: int = 60
 
     @field_validator("database_url", mode="before")

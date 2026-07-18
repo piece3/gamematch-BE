@@ -22,6 +22,7 @@ class MatchDetailResponse(BaseModel):
     id: int
     game: str
     game_mode: str | None = None
+    party_size: int = 1
     status: str
     accept_deadline: datetime | None
     created_at: datetime
@@ -30,6 +31,7 @@ class MatchDetailResponse(BaseModel):
     evaluation_deadline: datetime | None = None
     my_accept_status: str | None = None
     riot_match_id: str | None = None
+    nexon_match_id: str | None = None
     result_status: str | None = None
 
 

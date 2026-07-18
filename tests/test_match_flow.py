@@ -17,7 +17,6 @@ def _create_and_match_five(client, user_factory, auth_headers):
     for user in users:
         response = client.post(
             "/match/queue/join",
-            json={"game_mode": "SOLO"},
             headers=auth_headers(user),
         )
         assert response.status_code == 201
@@ -128,6 +127,20 @@ def test_decliner_is_removed_and_other_members_are_requeued(
         .where(QueueEntry.status == "waiting")
     )
     assert waiting_count == 4
+
+
+def test_join_queue_without_body_defaults_to_solo(
+    client: TestClient,
+    user_factory,
+    auth_headers,
+) -> None:
+    user = user_factory(with_profile=True)
+    response = client.post(
+        "/match/queue/join",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201
+    assert response.json()["game_mode"] == "SOLO"
 
 
 def test_quick_message_buttons_only(

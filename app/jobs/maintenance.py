@@ -9,6 +9,7 @@ from app.models.match import Match, MatchMember
 from app.models.match_evaluation import MatchEvaluation
 from app.services.manner import finalize_missing_evaluations
 from app.services.matchmaking import cancel_match_and_requeue
+from app.services.match_results import sync_match_result_from_fc_online
 
 logger = logging.getLogger(__name__)
 JOB_BATCH_SIZE = 100
@@ -67,8 +68,26 @@ def finalize_overdue_evaluations(db: Session) -> int:
     return inserted
 
 
+def retry_unresolved_fc_results(db: Session) -> int:
+    matches = db.scalars(
+        select(Match)
+        .where(
+            Match.game == "fc_online",
+            Match.status == "completed",
+            Match.result_status == "unresolved",
+        )
+        .order_by(Match.completed_at)
+        .limit(JOB_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    ).all()
+    synced = sum(sync_match_result_from_fc_online(db, match) for match in matches)
+    db.commit()
+    return synced
+
+
 def run_maintenance(db: Session) -> tuple[int, int]:
     expired_matches = expire_pending_matches(db)
+    retry_unresolved_fc_results(db)
     auto_evaluations = finalize_overdue_evaluations(db)
     return expired_matches, auto_evaluations
 
