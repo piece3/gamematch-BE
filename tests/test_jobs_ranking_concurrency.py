@@ -109,7 +109,7 @@ def test_concurrent_matchmaking_creates_only_one_match(
             QueueEntry(
                 user_id=user.id,
                 game="lol",
-                game_mode="SOLO",
+                game_mode="FLEX",
                 tier="SILVER",
                 tier_rank=3,
                 position=role,
@@ -124,7 +124,7 @@ def test_concurrent_matchmaking_creates_only_one_match(
     def attempt() -> int | None:
         with session_factory() as worker_db:
             barrier.wait()
-            match = try_form_match(worker_db)
+            match = try_form_match(worker_db, game="lol", game_mode="FLEX")
             return match.id if match else None
 
     with ThreadPoolExecutor(max_workers=2) as executor:

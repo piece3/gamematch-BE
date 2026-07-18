@@ -16,6 +16,8 @@ class MatchMemberSummary(BaseModel):
     assigned_role: str
     play_styles: list[str] | None
     accept_status: str
+    riot_id: str | None = None
+    fc_online_nickname: str | None = None
 
 
 class MatchDetailResponse(BaseModel):

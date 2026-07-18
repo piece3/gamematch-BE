@@ -35,7 +35,9 @@ def test_different_game_modes_do_not_match_together(
     user_factory,
     auth_headers,
 ) -> None:
-    solo_users = [user_factory(with_profile=True, position=role) for role in ROLES]
+    solo_users = [
+        user_factory(with_profile=True, position=role) for role in ("TOP", "MID")
+    ]
     flex_users = [user_factory(with_profile=True, position=role) for role in ROLES[:4]]
 
     for user in solo_users:
@@ -62,6 +64,14 @@ def test_different_game_modes_do_not_match_together(
     match = db.scalar(select(Match))
     assert match is not None
     assert match.game_mode == "SOLO"
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MatchMember)
+            .where(MatchMember.match_id == match.id)
+        )
+        == 2
+    )
     waiting_flex = db.scalar(
         select(func.count())
         .select_from(QueueEntry)

@@ -54,6 +54,7 @@ from app.services.matchmaking import (
     allowed_tier_delta,
     calc_elapsed_seconds,
     cancel_match_and_requeue,
+    required_member_count,
     tier_to_rank,
     try_form_match,
 )
@@ -547,11 +548,34 @@ def get_match_members(
         select(MatchMember).where(MatchMember.match_id == match_id)
     ).all()
 
+    # Riot / FC game IDs are shared only after the lobby is confirmed.
+    reveal_game_ids = match.status in ("confirmed", "completed")
+    lol_profiles = {}
+    fc_profiles = {}
+    if reveal_game_ids:
+        user_ids = [member.user_id for member in members]
+        if match.game == "lol":
+            lol_profiles = {
+                profile.user_id: profile
+                for profile in db.scalars(
+                    select(LolProfile).where(LolProfile.user_id.in_(user_ids))
+                ).all()
+            }
+        elif match.game == "fc_online":
+            fc_profiles = {
+                profile.user_id: profile
+                for profile in db.scalars(
+                    select(FcOnlineProfile).where(FcOnlineProfile.user_id.in_(user_ids))
+                ).all()
+            }
+
     summaries: list[MatchMemberSummary] = []
     for member in members:
         user = db.get(User, member.user_id)
         if user is None:
             continue
+        lol_profile = lol_profiles.get(member.user_id)
+        fc_profile = fc_profiles.get(member.user_id)
         summaries.append(
             MatchMemberSummary(
                 user_id=member.user_id,
@@ -565,6 +589,8 @@ def get_match_members(
                 assigned_role=member.assigned_role,
                 play_styles=member.play_styles,
                 accept_status=member.accept_status,
+                riot_id=lol_profile.riot_id if lol_profile else None,
+                fc_online_nickname=fc_profile.nickname if fc_profile else None,
             )
         )
 
@@ -714,7 +740,7 @@ def accept_match(
     accepted_count = sum(m.accept_status == "accepted" for m in members)
     declined_count = sum(m.accept_status == "declined" for m in members)
 
-    expected_members = 5 if match.game == "lol" else 2
+    expected_members = required_member_count(match.game, match.game_mode)
     if (
         len(members) == expected_members
         and accepted_count == expected_members

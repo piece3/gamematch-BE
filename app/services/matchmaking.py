@@ -28,6 +28,17 @@ REQUIRED_ROLES = ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
 FLEX_POSITIONS = {"ANYTHING"}
 
 
+def required_member_count(game: str, game_mode: str) -> int:
+    """How many queue representatives form one match for this game/mode."""
+    if game == "fc_online":
+        return 2
+    if game == "lol" and game_mode == "SOLO":
+        return 2
+    if game == "lol":
+        return 5
+    return 5
+
+
 def tier_to_rank(tier: str) -> int:
     try:
         return TIER_RANK[tier]
@@ -172,7 +183,7 @@ def try_form_match(
         .with_for_update(skip_locked=True)
     ).all()
 
-    required_members = 5 if game == "lol" else 2
+    required_members = required_member_count(game, game_mode)
     if len(waiting) < required_members:
         return None
 
@@ -183,7 +194,13 @@ def try_form_match(
         entries = list(group)
         if not group_tier_compatible(entries, elapsed_map):
             continue
-        if game == "lol":
+        if game == "lol" and game_mode == "SOLO":
+            # 솔랭은 듀오(2명)만 묶는다. 포지션 5라인 배정은 필요 없다.
+            roles = {
+                entry.user_id: f"DUO_{index}"
+                for index, entry in enumerate(entries, start=1)
+            }
+        elif game == "lol":
             roles = can_assign_roles(entries)
             if roles is None:
                 continue
