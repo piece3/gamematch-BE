@@ -15,10 +15,32 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DIVISION_METADATA_URL = (
-    "https://static.api.nexon.co.kr/fifaonline4/latest/division.json"
+    "https://open.api.nexon.com/static/fconline/meta/division.json"
 )
 MATCH_TYPE_1V1 = 50
 MATCH_TYPE_2V2 = 52
+
+# Used when the static metadata endpoint is unreachable.
+FALLBACK_DIVISION_METADATA: list[tuple[int, str]] = [
+    (800, "슈퍼챔피언스"),
+    (900, "챔피언스"),
+    (1000, "슈퍼챌린지"),
+    (1100, "챌린지1"),
+    (1200, "챌린지2"),
+    (1300, "챌린지3"),
+    (2000, "월드클래스1"),
+    (2100, "월드클래스2"),
+    (2200, "월드클래스3"),
+    (2300, "프로1"),
+    (2400, "프로2"),
+    (2500, "프로3"),
+    (2600, "세미프로1"),
+    (2700, "세미프로2"),
+    (2800, "세미프로3"),
+    (2900, "유망주1"),
+    (3000, "유망주2"),
+    (3100, "유망주3"),
+]
 
 
 class FcOnlineApiError(Exception):
@@ -267,7 +289,7 @@ def parse_division_metadata(payload: object) -> list[tuple[int, str]]:
 def fetch_division_metadata(
     fallback_payload: object | None = None,
 ) -> list[tuple[int, str]]:
-    """Fetch ordered division metadata, falling back to injected data."""
+    """Fetch ordered division metadata, falling back to injected/static data."""
 
     try:
         response = _client.get(
@@ -280,7 +302,11 @@ def fetch_division_metadata(
             return parsed
     except (httpx.HTTPError, ValueError):
         logger.warning("FC Online division metadata request failed")
-    return parse_division_metadata(fallback_payload)
+
+    injected = parse_division_metadata(fallback_payload)
+    if injected:
+        return injected
+    return list(FALLBACK_DIVISION_METADATA)
 
 
 def _division_lookup(
@@ -311,9 +337,10 @@ def _division_value(
             return DivisionValue(None, None, None)
         metadata = lookup.get(division_id)
         if metadata is None:
-            return DivisionValue(division_id, str(division_id), None)
+            # Keep a usable label even if metadata is stale/incomplete.
+            return DivisionValue(division_id, f"등급({division_id})", None)
         return DivisionValue(division_id, metadata[0], metadata[1])
-    return DivisionValue(None, None, None)
+    return DivisionValue(None, "UN_RANKED", 0)
 
 
 def build_sync_payload(
