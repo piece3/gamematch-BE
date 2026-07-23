@@ -94,3 +94,23 @@ class QueueStatusResponse(BaseModel):
     allowed_tier_delta: int = 0
     waiting_count: int = 0
     message: str | None = None
+
+
+class GameOnlineCount(BaseModel):
+    game: str
+    waiting_count: int = 0
+    in_match_count: int = 0
+    online_count: int = 0
+
+
+class GameModeOnlineCount(BaseModel):
+    game: str
+    game_mode: str
+    waiting_count: int = 0
+
+
+class OnlineCountsResponse(BaseModel):
+    """Approximate online users: waiting in queue + active match participants."""
+
+    games: list[GameOnlineCount]
+    by_mode: list[GameModeOnlineCount]

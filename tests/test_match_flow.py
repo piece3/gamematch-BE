@@ -218,6 +218,40 @@ def test_members_reveal_riot_id_only_after_confirmed(
     assert riot_ids[users[1].id] == f"{users[1].nickname}#KR1"
 
 
+def test_online_counts_by_game(
+    client: TestClient,
+    user_factory,
+    auth_headers,
+) -> None:
+    waiting = user_factory(with_profile=True, position="TOP")
+    assert (
+        client.post(
+            "/match/queue/join",
+            json={"game": "lol", "game_mode": "SOLO", "party_size": 1},
+            headers=auth_headers(waiting),
+        ).status_code
+        == 201
+    )
+    solo_users, _match_id = _create_and_match_solo_duo(
+        client,
+        user_factory,
+        auth_headers,
+    )
+
+    response = client.get("/match/online", headers=auth_headers(solo_users[0]))
+    assert response.status_code == 200
+    payload = response.json()
+    by_game = {item["game"]: item for item in payload["games"]}
+    assert by_game["lol"]["waiting_count"] == 1
+    assert by_game["lol"]["in_match_count"] == 2
+    assert by_game["lol"]["online_count"] == 3
+    assert by_game["fc_online"]["online_count"] == 0
+    assert any(
+        item["game"] == "lol" and item["game_mode"] == "SOLO" and item["waiting_count"] == 1
+        for item in payload["by_mode"]
+    )
+
+
 def test_join_queue_without_body_defaults_to_solo(
     client: TestClient,
     user_factory,

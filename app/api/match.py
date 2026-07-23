@@ -34,6 +34,9 @@ from app.schemas.match import (
     QuickMessageSendRequest,
 )
 from app.schemas.queue import (
+    GameModeOnlineCount,
+    GameOnlineCount,
+    OnlineCountsResponse,
     QueueJoinRequest,
     QueueJoinResponse,
     QueueStatusResponse,
@@ -206,6 +209,62 @@ def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailRes
         nexon_match_id=match.nexon_match_id,
         result_status=match.result_status,
     )
+
+
+def _online_counts(db: Session) -> OnlineCountsResponse:
+    """Count users waiting in queue and users in live matches, per game."""
+    tracked_games = ("lol", "fc_online")
+
+    waiting_rows = db.execute(
+        select(QueueEntry.game, QueueEntry.game_mode, func.count())
+        .where(QueueEntry.status == "waiting")
+        .group_by(QueueEntry.game, QueueEntry.game_mode)
+    ).all()
+    waiting_by_mode = {
+        (game, game_mode): int(count) for game, game_mode, count in waiting_rows
+    }
+    waiting_by_game = {game: 0 for game in tracked_games}
+    for (game, _mode), count in waiting_by_mode.items():
+        waiting_by_game[game] = waiting_by_game.get(game, 0) + count
+
+    in_match_rows = db.execute(
+        select(Match.game, func.count(func.distinct(MatchMember.user_id)))
+        .join(MatchMember, MatchMember.match_id == Match.id)
+        .where(Match.status.in_(("pending_accept", "confirmed")))
+        .group_by(Match.game)
+    ).all()
+    in_match_by_game = {game: int(count) for game, count in in_match_rows}
+
+    games = [
+        GameOnlineCount(
+            game=game,
+            waiting_count=waiting_by_game.get(game, 0),
+            in_match_count=in_match_by_game.get(game, 0),
+            online_count=(
+                waiting_by_game.get(game, 0) + in_match_by_game.get(game, 0)
+            ),
+        )
+        for game in tracked_games
+    ]
+    by_mode = [
+        GameModeOnlineCount(
+            game=game,
+            game_mode=game_mode,
+            waiting_count=count,
+        )
+        for (game, game_mode), count in sorted(waiting_by_mode.items())
+    ]
+    return OnlineCountsResponse(games=games, by_mode=by_mode)
+
+
+@router.get("/online", response_model=OnlineCountsResponse)
+def get_online_counts(
+    current_user: Annotated[User, Depends(get_current_verified_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> OnlineCountsResponse:
+    """게임별 현재 온라인(대기열 + 활성 매칭) 유저 수."""
+    _ = current_user
+    return _online_counts(db)
 
 
 @router.post("/queue/join", response_model=QueueJoinResponse, status_code=status.HTTP_201_CREATED)
