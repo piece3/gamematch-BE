@@ -35,6 +35,7 @@ def get_lol_ranking(
             rank_division=row.rank_division,
             league_points=row.league_points,
             primary_position=row.primary_position,
+            riot_id=row.riot_id,
         )
         for row in rows
     ]
@@ -63,6 +64,7 @@ def get_my_ranking(
             rank=None,
             tier=profile.tier,
             tier_rank=profile.tier_rank,
+            riot_id=profile.riot_id,
             has_lol_profile=True,
             message="순위를 계산할 수 없습니다.",
         )
@@ -75,6 +77,7 @@ def get_my_ranking(
         tier_rank=info.get("tier_rank"),
         rank_division=info.get("rank_division"),
         league_points=info.get("league_points"),
+        riot_id=info.get("riot_id"),
         percentile=info.get("percentile"),
         message=info.get("message"),
         has_lol_profile=True,

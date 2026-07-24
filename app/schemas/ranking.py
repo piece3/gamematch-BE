@@ -11,6 +11,7 @@ class RankingEntry(BaseModel):
     primary_position: str
     rank_division: str | None = None
     league_points: int | None = None
+    riot_id: str | None = None
 
 
 class RankingListResponse(BaseModel):
@@ -28,6 +29,7 @@ class MyRankingResponse(BaseModel):
     tier_rank: int | None = None
     rank_division: str | None = None
     league_points: int | None = None
+    riot_id: str | None = None
     percentile: float | None = None
     message: str | None = None
     has_lol_profile: bool = True

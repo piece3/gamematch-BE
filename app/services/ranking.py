@@ -50,6 +50,7 @@ def _ranked_users_query(include_unranked: bool = False):
             LolProfile.rank_division,
             LolProfile.league_points,
             LolProfile.primary_position,
+            LolProfile.riot_id,
         )
         .join(LolProfile, LolProfile.user_id == User.id)
         .where(
@@ -95,6 +96,9 @@ def get_user_rank(
             "rank": None,
             "tier": profile.tier,
             "tier_rank": profile.tier_rank,
+            "rank_division": profile.rank_division,
+            "league_points": profile.league_points,
+            "riot_id": profile.riot_id,
             "total_players": None,
             "percentile": None,
             "message": "UN_RANKED는 랭킹 보드에 포함되지 않습니다.",
@@ -117,6 +121,7 @@ def get_user_rank(
         "tier_rank": profile.tier_rank,
         "rank_division": profile.rank_division,
         "league_points": profile.league_points,
+        "riot_id": profile.riot_id,
         "percentile": round((1 - (my_rank - 1) / total) * 100, 1) if total else None,
         "message": None,
     }

@@ -54,7 +54,7 @@ def test_maintenance_creates_neutral_auto_evaluations(
     assert all(item.is_auto and item.manner_delta == 0 for item in evaluations)
 
 
-def test_public_ranking_is_private_and_uses_division_and_lp(
+def test_public_ranking_includes_riot_id_and_uses_division_and_lp(
     client: TestClient,
     db: Session,
     user_factory,
@@ -91,11 +91,12 @@ def test_public_ranking_is_private_and_uses_division_and_lp(
         users[1].id,
         users[0].id,
     ]
-    assert "riot_id" not in items[0]
+    assert items[0]["riot_id"] == f"Player{users[2].id}#KR1"
     assert "college" not in items[0]
     assert "department" not in items[0]
     assert mine.status_code == 200
     assert mine.json()["rank"] == 2
+    assert mine.json()["riot_id"] == f"Player{users[1].id}#KR1"
 
 
 def test_concurrent_matchmaking_creates_only_one_match(
