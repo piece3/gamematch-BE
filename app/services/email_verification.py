@@ -43,6 +43,11 @@ def create_and_store_verification_token(
                 seconds=settings.email_resend_cooldown_seconds
             )
             if datetime.now(UTC) < retry_at:
+                logger.warning(
+                    "Verification email skipped (cooldown) user_id=%s retry_after=%ss",
+                    locked_user.id,
+                    int((retry_at - datetime.now(UTC)).total_seconds()),
+                )
                 return None
 
     raw_token = secrets.token_urlsafe(32)
@@ -113,12 +118,22 @@ def send_verification_email(to_email: str, verification_url: str) -> bool:
     msg["To"] = to_email
     msg.set_content(body)
 
+    # warning으로 남겨 Render Logs에서 항상 보이게 한다 (info는 안 뜨는 경우 많음)
+    logger.warning(
+        "Sending verification email | To=%s | From=%s | SMTP_USER=%s",
+        to_email,
+        settings.mail_from,
+        settings.smtp_user,
+    )
+
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as server:
+            server.ehlo()
             server.starttls()
+            server.ehlo()
             server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(msg)
-        logger.info("Verification email sent to %s", to_email)
+        logger.warning("Verification email sent to %s", to_email)
         return True
     except Exception:
         logger.exception("Failed to send verification email to %s", to_email)

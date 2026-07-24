@@ -6,15 +6,17 @@ from app.schemas.auth import Token
 from app.schemas.user import UserLogin
 
 from fastapi import APIRouter, Depends, HTTPException,status, BackgroundTasks
+from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse
 
-from app.schemas.email import MessageResponse, ResendVerificationRequest, VerifyEmailResponse
+from app.schemas.email import MessageResponse, ResendVerificationRequest
 from app.services.email_verification import(
     build_verification_url,
     create_and_store_verification_token,
@@ -46,17 +48,21 @@ def register(
 
     existing = db.scalar(select(User).where(User.email == payload.email.lower()))
     if existing is not None:
-        if not existing.is_verified:
-            raw_token = create_and_store_verification_token(
-                db,
-                existing,
-                respect_cooldown=True,
+        if existing.is_verified:
+            # 이미 인증된 계정이면 메일을 보내지 않음 (응답은 동일하게 202)
+            return MessageResponse(
+                message=GENERIC_VERIFICATION_MESSAGE,
             )
-            if raw_token is not None:
-                verify_url = build_verification_url(raw_token)
-                background_tasks.add_task(
-                    send_verification_email, existing.email, verify_url
-                )
+        raw_token = create_and_store_verification_token(
+            db,
+            existing,
+            respect_cooldown=True,
+        )
+        if raw_token is not None:
+            verify_url = build_verification_url(raw_token)
+            background_tasks.add_task(
+                send_verification_email, existing.email, verify_url
+            )
         return MessageResponse(
             message=GENERIC_VERIFICATION_MESSAGE,
         )
@@ -137,17 +143,22 @@ def read_me(
     return current_user
 
 
-@router.get("/verify-email", response_model=VerifyEmailResponse)
-def verify_email(token: str, db: Annotated[Session, Depends(get_db)]) -> VerifyEmailResponse:
-    try:
-        user = verify_email_token(db, token)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+def _verify_email_redirect(status_value: str) -> RedirectResponse:
+    base = settings.frontend_base_url.rstrip("/")
+    return RedirectResponse(
+        url=f"{base}/#/verify-email?status={status_value}",
+        status_code=status.HTTP_302_FOUND,
+    )
 
-    return VerifyEmailResponse(message="Email verified successfully", is_verified=user.is_verified)
+
+@router.get("/verify-email", response_class=RedirectResponse)
+def verify_email(token: str, db: Annotated[Session, Depends(get_db)]) -> RedirectResponse:
+    try:
+        verify_email_token(db, token)
+    except ValueError:
+        return _verify_email_redirect("error")
+
+    return _verify_email_redirect("success")
 
 
 

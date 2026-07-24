@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     email_verify_token_expire_hours: int = 24
     app_base_url: str = "http://127.0.0.1:8000"
+    # 이메일 인증 링크 클릭 후 프론트 리다이렉트 기준 URL
+    frontend_base_url: str = "https://simulooker.github.io/404-FE"
     email_dev_mode: bool = True
     
     smtp_host: str = "smtp.gmail.com"
@@ -41,11 +43,25 @@ class Settings(BaseSettings):
     email_resend_cooldown_seconds: int = 60
 
     @field_validator("database_url", mode="before")
-
     @classmethod
     def normalize_database_url(cls, value: str) -> str:
         if isinstance(value, str) and value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return value
+
+    @field_validator(
+        "smtp_password",
+        "smtp_user",
+        "mail_from",
+        "mail_from_name",
+        "smtp_host",
+        mode="before",
+    )
+    @classmethod
+    def strip_wrapping_quotes(cls, value: object) -> object:
+        # Render UI에 "password"처럼 따옴표를 넣으면 Gmail 로그인이 실패한다.
+        if isinstance(value, str):
+            return value.strip().strip("\"'")
         return value
 
     @model_validator(mode="after")
@@ -67,6 +83,7 @@ class Settings(BaseSettings):
         if not self.app_base_url.startswith("https://"):
             raise ValueError("APP_BASE_URL must use HTTPS in production")
         return self
+
 
 settings = Settings()
 
