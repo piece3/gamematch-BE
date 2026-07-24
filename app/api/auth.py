@@ -6,17 +6,15 @@ from app.schemas.auth import Token
 from app.schemas.user import UserLogin
 
 from fastapi import APIRouter, Depends, HTTPException,status, BackgroundTasks
-from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
-from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse
 
-from app.schemas.email import MessageResponse, ResendVerificationRequest
+from app.schemas.email import MessageResponse, ResendVerificationRequest, VerifyEmailResponse
 from app.services.email_verification import(
     build_verification_url,
     create_and_store_verification_token,
@@ -143,23 +141,17 @@ def read_me(
     return current_user
 
 
-def _verify_email_redirect(status_value: str) -> RedirectResponse:
-    base = settings.frontend_base_url.rstrip("/")
-    return RedirectResponse(
-        url=f"{base}/#/verify-email?status={status_value}",
-        status_code=status.HTTP_302_FOUND,
-    )
-
-
-@router.get("/verify-email", response_class=RedirectResponse)
-def verify_email(token: str, db: Annotated[Session, Depends(get_db)]) -> RedirectResponse:
+@router.get("/verify-email", response_model=VerifyEmailResponse)
+def verify_email(token: str, db: Annotated[Session, Depends(get_db)]) -> VerifyEmailResponse:
     try:
-        verify_email_token(db, token)
-    except ValueError:
-        return _verify_email_redirect("error")
+        user = verify_email_token(db, token)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
-    return _verify_email_redirect("success")
-
+    return VerifyEmailResponse(message="Email verified successfully", is_verified=user.is_verified)
 
 
 @router.post("/resend-verification", response_model=MessageResponse)

@@ -166,16 +166,41 @@ def _expire_if_needed(db: Session, match: Match) -> None:
         db.commit()
 
 
+def _user_needs_evaluation(db: Session, match: Match, user_id: int) -> bool:
+    """True while a completed match still needs this user's manual evaluation."""
+    if match.status != "completed":
+        return False
+    if evaluation_deadline_passed(match):
+        return False
+    member_count = len(_member_user_ids(db, match.id))
+    required = max(0, member_count - 1)
+    if required == 0:
+        return False
+    submitted = count_evaluations_by_evaluator(
+        db,
+        match.id,
+        user_id,
+        manual_only=True,
+    )
+    return submitted < required
+
+
 def _find_active_match_for_user(db: Session, user_id: int) -> Match | None:
-    return db.scalar(
+    matches = db.scalars(
         select(Match)
         .join(MatchMember, MatchMember.match_id == Match.id)
         .where(
             MatchMember.user_id == user_id,
-            Match.status.in_(("pending_accept", "confirmed")),
+            Match.status.in_(("pending_accept", "confirmed", "completed")),
         )
         .order_by(Match.created_at.desc())
-    )
+    ).all()
+    for match in matches:
+        if match.status in ("pending_accept", "confirmed"):
+            return match
+        if _user_needs_evaluation(db, match, user_id):
+            return match
+    return None
 
 
 def _find_live_active_match_for_user(
@@ -189,7 +214,17 @@ def _find_live_active_match_for_user(
     db.refresh(match)
     if match.status in ("pending_accept", "confirmed"):
         return match
+    if _user_needs_evaluation(db, match, user_id):
+        return match
     return None
+
+
+def _active_match_status_message(match_status: str) -> str:
+    if match_status == "pending_accept":
+        return "매칭이 성사되었습니다. 수락/거절을 진행하세요."
+    if match_status == "completed":
+        return "게임이 완료되었습니다. 평가를 진행하세요."
+    return "매칭이 확정되었습니다."
 
 
 def _to_match_detail(match: Match, member: MatchMember | None) -> MatchDetailResponse:
@@ -365,11 +400,7 @@ def queue_status(
             in_queue=False,
             match_id=active_match.id,
             match_status=active_match.status,
-            message=(
-                "매칭이 성사되었습니다. 수락/거절을 진행하세요."
-                if active_match.status == "pending_accept"
-                else "매칭이 확정되었습니다."
-            ),
+            message=_active_match_status_message(active_match.status),
         )
 
     entry = db.scalar(
@@ -387,11 +418,7 @@ def queue_status(
                 in_queue=False,
                 match_id=active_match.id,
                 match_status=active_match.status,
-                message=(
-                    "매칭이 성사되었습니다. 수락/거절을 진행하세요."
-                    if active_match.status == "pending_accept"
-                    else "매칭이 확정되었습니다."
-                ),
+                message=_active_match_status_message(active_match.status),
             )
         # No active match owns the locked row, so repair it in place.
         entry.status = "waiting"
@@ -568,13 +595,8 @@ def get_active_match(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MatchDetailResponse | None:
-    match = _find_active_match_for_user(db, current_user.id)
+    match = _find_live_active_match_for_user(db, current_user.id)
     if match is None:
-        return None
-
-    _expire_if_needed(db, match)
-    db.refresh(match)
-    if match.status not in ("pending_accept", "confirmed"):
         return None
 
     member = _get_member_or_403(db, match.id, current_user.id)

@@ -91,6 +91,17 @@ def test_queue_accept_complete_evaluate_and_history(
     assert completed.status_code == 200
     assert completed.json()["status"] == "completed"
 
+    # complete 후에도 평가 전까지는 양쪽 모두 /active에 남아야 한다.
+    for user in users:
+        active_after_complete = client.get(
+            "/match/active",
+            headers=auth_headers(user),
+        )
+        assert active_after_complete.status_code == 200
+        assert active_after_complete.json() is not None
+        assert active_after_complete.json()["id"] == match_id
+        assert active_after_complete.json()["status"] == "completed"
+
     evaluation = client.post(
         f"/match/{match_id}/evaluate",
         headers=auth_headers(users[0]),
@@ -102,6 +113,21 @@ def test_queue_accept_complete_evaluate_and_history(
         },
     )
     assert evaluation.status_code == 200
+
+    # 평가를 끝낸 유저만 /active에서 빠진다.
+    active_after_eval = client.get(
+        "/match/active",
+        headers=auth_headers(users[0]),
+    )
+    assert active_after_eval.status_code == 200
+    assert active_after_eval.json() is None
+
+    still_active = client.get(
+        "/match/active",
+        headers=auth_headers(users[1]),
+    )
+    assert still_active.status_code == 200
+    assert still_active.json()["status"] == "completed"
 
     history = client.get(
         "/match/history",

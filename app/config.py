@@ -18,8 +18,6 @@ class Settings(BaseSettings):
 
     email_verify_token_expire_hours: int = 24
     app_base_url: str = "http://127.0.0.1:8000"
-    # 이메일 인증 링크 클릭 후 프론트 리다이렉트 기준 URL
-    frontend_base_url: str = "https://simulooker.github.io/404-FE"
     email_dev_mode: bool = True
     
     smtp_host: str = "smtp.gmail.com"
